@@ -1,0 +1,8 @@
+{
+  "name": "SEO KW targeting Pro 5.2",
+  "description": "A Google Autosuggest keyword scraper with Gemini AI integration to filter and analyze keywords based on custom prompts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
