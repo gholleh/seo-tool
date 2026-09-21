@@ -108,8 +108,23 @@ textarea{min-height:145px;direction:ltr;text-align:left;font-family:ui-monospace
 .model-error{margin-top:8px;color:#b91c1c;font-size:10px;direction:ltr;text-align:left;min-height:16px}
 .history-item{padding:14px 0;border-bottom:1px solid #eef2f7}.history-item:last-child{border-bottom:0}.history-item b{font-size:12px}.history-item p{margin:3px 0 0;color:#64748b;font-size:10px}
 .rowbetween{display:flex;justify-content:space-between;gap:12px;align-items:center}
+.brief{background:linear-gradient(180deg,#ffffff,#fbfdff);border:1px solid #dbe5f2;border-radius:18px;padding:20px;box-shadow:0 6px 22px rgba(15,23,42,.05)}
+.brief-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;margin-bottom:16px}
+.brief-head h3{margin:0;font-size:16px}.brief-head p{margin:5px 0 0;color:#64748b;font-size:10.5px}
+.brief-kicker{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;font-size:9.5px;font-weight:800;white-space:nowrap}
+.brief-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.brief-item{border:1px solid #e2e8f0;background:#fff;border-radius:13px;padding:13px}
+.brief-item strong{display:block;color:#0f172a;font-size:11px;margin-bottom:5px}.brief-item p{margin:0;color:#475569;font-size:10.5px;line-height:1.9}
+.brief-concepts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+.concept-card{border:1px solid #e2e8f0;background:#fff;border-radius:13px;padding:13px}
+.concept-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.concept-top b{font-size:11.5px}
+.concept-meta{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.mini-tag{border-radius:999px;background:#f1f5f9;color:#475569;padding:3px 7px;font-size:8.8px}
+.concept-desc{color:#64748b;font-size:9.8px;line-height:1.9;margin-top:6px}.concept-query{margin-top:8px;padding-top:8px;border-top:1px dashed #e2e8f0;color:#334155;font-size:9.8px}
+.brief-note{margin-top:12px;padding:12px 13px;border-radius:12px;background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:9.8px;line-height:1.9}
+.brief-query{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid #eef2f7}.brief-query:last-child{border-bottom:0}
+.brief-query b{font-size:10.5px}.brief-query span{font-size:9.2px;color:#64748b}.brief-query em{font-style:normal;font-size:9px;color:#2563eb}
 .footer-note{text-align:center;color:#94a3b8;font-size:9.5px;margin-top:30px}
-@media(max-width:900px){.hero-grid,.g2,.g3{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.header-inner{align-items:flex-start}.status{justify-content:flex-start}.main,.header-inner{padding-left:16px;padding-right:16px}}
+@media(max-width:900px){.hero-grid,.g2,.g3,.brief-grid,.brief-concepts{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.header-inner{align-items:flex-start}.status{justify-content:flex-start}.main,.header-inner{padding-left:16px;padding-right:16px}}
 @media(max-width:540px){.metrics{grid-template-columns:1fr 1fr}.nav{width:100%}.tab{flex:1;padding-left:8px;padding-right:8px}.header-inner{display:block}.status{margin-top:14px}.actions .btn{flex:1}.keyword-card h3{font-size:18px}}
 </style>
 </head>
@@ -218,7 +233,7 @@ var providers={
 var defaults={
   relevance:"از context_top_queries هویت غالب این URL را بفهم. برای هر query ID دقیقاً یکی از Relevant، Adjacent یا Irrelevant برگردان. هیچ query یا metric جدید نساز. خروجی فقط JSON با شکل {\"items\":[{\"id\":\"q1\",\"label\":\"Relevant\",\"reason\":\"...\",\"confidence\":0.9}]} باشد.",
   classification:"فقط phraseهای داده‌شده را طبقه‌بندی و در conceptهای معنایی گروه‌بندی کن. type باید یکی از allowed_types باشد. هیچ phrase یا metric جدید نساز. همه IDها دقیقاً یک‌بار برگردند. خروجی فقط JSON با شکل {\"items\":[{\"id\":\"p1\",\"type\":\"Core Entity\",\"concept_key\":\"...\",\"confidence\":0.9}]} باشد.",
-  intent:"فقط از query_id و concept_keyهای ورودی انتخاب کن. Opportunity یا Position را به‌عنوان اهمیت تقاضا استفاده نکن. خروجی فقط JSON و دقیقاً با این schema باشد: {\"main_intent\":\"...\",\"primary_query_id\":\"q1\",\"variant_query_ids\":[\"q2\"],\"concept_importance\":[{\"concept_key\":\"exact input concept key\",\"importance\":\"Core\"}]}. concept_importance حتماً ARRAY باشد، نه object/map. برای هر concept ورودی دقیقاً یک آیتم برگردان و هیچ ID یا metric جدید نساز."
+  intent:"فقط از query_id و concept_keyهای ورودی انتخاب کن. Opportunity یا Position را به‌عنوان اهمیت تقاضا استفاده نکن. main_intent را کوتاه، دقیق و به زبان فارسی بنویس. خروجی فقط JSON و دقیقاً با این schema باشد: {\"main_intent\":\"...\",\"primary_query_id\":\"q1\",\"variant_query_ids\":[\"q2\"],\"concept_importance\":[{\"concept_key\":\"exact input concept key\",\"importance\":\"Core\"}]}. concept_importance حتماً ARRAY باشد، نه object/map. برای هر concept ورودی دقیقاً یک آیتم برگردان و هیچ ID یا metric جدید نساز."
 };
 var allowedTypes=["Core Entity","Semantic Concept","Temporal Qualifier","Modifier","Brand","Product / Model Entity","Location","Content Format","Action / Sub-intent","Question Pattern"];
 var allowedImp=["Core","Important","Secondary","Conditional"];
@@ -601,11 +616,62 @@ function ctable(cs){
     cs.map(function(c){return '<tr><td><b>'+esc(c.key)+'</b></td><td>'+esc(c.type)+'</td><td class="imp '+esc(c.importance)+'">'+esc(c.importance)+'</td><td>'+c.count+'</td><td>'+fmt.format(c.impressions)+'</td><td>'+c.share.toFixed(1)+'٪</td></tr>';}).join("")+
   '</tbody></table></div>';
 }
+function faType(type){
+  var m={"Core Entity":"موجودیت اصلی","Semantic Concept":"مفهوم معنایی","Temporal Qualifier":"قید زمانی","Modifier":"ویژگی / قید","Brand":"برند","Product / Model Entity":"محصول / مدل","Location":"مکان","Content Format":"فرمت محتوا","Action / Sub-intent":"اقدام / زیرهدف","Question Pattern":"الگوی سوال"};
+  return m[type]||type;
+}
+function faImportance(x){return {Core:"هسته اصلی",Important:"مهم",Secondary:"ثانویه",Conditional:"مشروط"}[x]||x;}
+function conceptDisplay(c){return c&&c.words&&c.words.length?c.words[0].text:c.key;}
+function dataReadableBrief(e){
+  var topQ=e.queries[0],topP=e.candidates[0],s=e.summary;
+  return '<h2 class="section">گزارش فارسی برای کارشناس SEO و محتوا</h2>'+
+    '<div class="brief">'+
+      '<div class="brief-head"><div><h3>برداشت قابل‌فهم از داده خام</h3><p>این بخش فقط از موتور داده ساخته شده و هنوز هیچ قضاوت معنایی AI داخلش نیست.</p></div><span class="brief-kicker">Data-only</span></div>'+
+      '<div class="brief-grid">'+
+        '<div class="brief-item"><strong>حجم دیتای قابل مشاهده</strong><p>بعد از نرمال‌سازی، '+fmt.format(s.valid)+' Query یکتا داریم که در مجموع '+fmt.format(s.visible)+' Impression قابل مشاهده ساخته‌اند.'+(s.total?' این مقدار حدود '+s.coverage.toFixed(1)+'٪ از Impression صفحه در شیت Pages است.':'')+'</p></div>'+
+        '<div class="brief-item"><strong>عمق تحلیل عبارت‌ها</strong><p>بلندترین Query این فایل '+fmt.format(s.maxQueryLength)+' کلمه دارد؛ بنابراین N-gram از ۱ تا '+fmt.format(s.maxQueryLength)+' کلمه محاسبه شده، نه فقط ۱ تا ۳ کلمه.</p></div>'+
+        '<div class="brief-item"><strong>قوی‌ترین Query خام</strong><p>'+(topQ?'«'+esc(topQ.normalized)+'» با '+fmt.format(topQ.impressions)+' Impression'+(topQ.position!=null?' و Position میانگین '+topQ.position.toFixed(2):'')+'.':'داده کافی نیست.')+'</p></div>'+
+        '<div class="brief-item"><strong>پوشش بالای یک Phrase</strong><p>'+(topP?'عبارت «'+esc(topP.text)+'» داخل Queryهایی دیده شده که مجموعاً '+fmt.format(topP.includedImpressions)+' Impression دارند. این عدد «پوشش» است و حجم جستجوی مستقل آن عبارت نیست.':'داده کافی نیست.')+'</p></div>'+
+      '</div>'+
+      '<div class="brief-note">برای تعیین Primary Keyword، Variantها، Intent و مفهوم‌های اصلی باید «تحلیل کامل با AI» اجرا شود. موتور داده به‌تنهایی نباید این تصمیم‌های معنایی را حدس بزند.</div>'+
+    '</div>';
+}
+function humanReadableBrief(e,a){
+  var qm=new Map(e.queries.map(function(q){return [q.id,q];}));
+  var p=qm.get(a.intent.j.primary_query_id);
+  var variants=a.intent.vars.map(function(id){return qm.get(id);}).filter(Boolean);
+  var important=a.intent.concepts.filter(function(c){return c.importance==="Core"||c.importance==="Important";});
+  var reps=a.reps.map(function(id){return qm.get(id);}).filter(Boolean);
+  var relevantTotal=a.classification.rq.reduce(function(s,q){return s+q.impressions;},0)||1;
+  var conceptsHtml=important.map(function(c){
+    var carrier=qm.get(c.carrier),label=conceptDisplay(c);
+    var wording=(c.words||[]).slice(0,4).map(function(w){return esc(w.text)+' ('+fmt.format(w.impressions)+')';}).join('، ');
+    return '<div class="concept-card"><div class="concept-top"><b>'+esc(label)+'</b><span class="mini-tag '+esc(c.importance)+'">'+esc(faImportance(c.importance))+'</span></div>'+
+      '<div class="concept-meta"><span class="mini-tag">'+esc(faType(c.type))+'</span><span class="mini-tag">'+fmt.format(c.count)+' Query</span><span class="mini-tag">'+c.share.toFixed(1)+'٪ از Impression مرتبط</span></div>'+
+      '<div class="concept-desc">این مفهوم در Queryهایی دیده شده که مجموعاً '+fmt.format(c.impressions)+' Impression دارند. عبارت‌بندی‌های پرتکرار: '+(wording||'—')+'.</div>'+
+      '<div class="concept-query"><b>Carrier Query:</b> '+esc(carrier?carrier.normalized:'—')+(carrier?' — '+fmt.format(carrier.impressions)+' Impression':'')+'</div></div>';
+  }).join("");
+  var repsHtml=reps.map(function(q){
+    var covers=important.filter(function(c){return c.qids.indexOf(q.id)>=0;}).map(function(c){return conceptDisplay(c);}).slice(0,4);
+    return '<div class="brief-query"><div><b>'+esc(q.normalized)+'</b><div><span>'+fmt.format(q.impressions)+' Impression'+(q.position!=null?' · Position '+q.position.toFixed(2):'')+'</span></div></div><em>'+(covers.length?'نماینده: '+esc(covers.join('، ')):'شاخه تقاضای مستقل')+'</em></div>';
+  }).join("");
+  return '<h2 class="section">گزارش فارسی برای کارشناس SEO و محتوا</h2>'+
+    '<div class="brief"><div class="brief-head"><div><h3>خلاصه قابل استفاده از هویت جستجوی این URL</h3><p>این متن توضیح همان خروجی داده‌ای و معنایی بالاست؛ نه توصیه Opportunity و نه بررسی اینکه محتوا الان چه چیزی را پوشش داده است.</p></div><span class="brief-kicker">Phase 1</span></div>'+
+      '<div class="brief-grid">'+
+        '<div class="brief-item"><strong>موضوع / هویت اصلی صفحه</strong><p>کلمه کلیدی اصلی برای توصیف هویت جستجو: <b>«'+esc(p?p.normalized:'—')+'»</b>'+(p?'؛ Exact Impressions آن '+fmt.format(p.impressions)+(p.position!=null?' و Position میانگین '+p.position.toFixed(2):'')+'.':'')+'</p></div>'+
+        '<div class="brief-item"><strong>هدف غالب کاربر</strong><p>'+esc(a.intent.j.main_intent||'—')+'</p></div>'+
+        '<div class="brief-item"><strong>Variantهای ضروری</strong><p>'+(variants.length?variants.map(function(q){return '«'+esc(q.normalized)+'» — '+fmt.format(q.impressions)+' Impression';}).join('؛ '):'Variant ضروری مستقلی تشخیص داده نشد.')+'</p></div>'+
+        '<div class="brief-item"><strong>دامنه دیتای مرتبط</strong><p>'+fmt.format(a.classification.rq.length)+' Query مرتبط باقی مانده‌اند که مجموعاً '+fmt.format(relevantTotal)+' Impression دارند. درصدهای Concept در ادامه نسبت به همین دیتای مرتبط محاسبه شده‌اند.</p></div>'+
+      '</div><div class="brief-concepts">'+conceptsHtml+'</div>'+
+      '<div class="brief-item" style="margin-top:12px"><strong>سه Query نماینده تقاضا</strong>'+repsHtml+'</div>'+
+      '<div class="brief-note"><b>تفسیر شاخص‌ها:</b> Exact Impressions یعنی Impression همان Query بعد از نرمال‌سازی. Included Impressions یعنی مجموع Impression تمام Queryهایی که آن Phrase یا Concept را در خود دارند؛ بنابراین حجم جستجوی مستقل نیست و بین Conceptها هم‌پوشانی طبیعی دارد. Position فقط برای زمینه نمایش داده می‌شود و در تعیین Importance نقش اصلی ندارد.</div>'+
+    '</div>';
+}
 function renderData(e){
   $("out").innerHTML=
     '<h2 class="section">Dataset Summary</h2><div class="card flat">'+metricCards(e)+'<div class="notice">موتور داده با موفقیت اجرا شد. بخش‌های معنایی عمداً بدون AI اجرا نشدند.</div></div>'+
     '<h2 class="section">Top Queries</h2>'+qtable(e.queries.slice(0,30))+
-    '<h2 class="section">Important Included Phrases</h2>'+ptable(e.candidates.slice(0,35));
+    '<h2 class="section">Important Included Phrases</h2>'+ptable(e.candidates.slice(0,35))+dataReadableBrief(e);
 }
 function renderFull(e,a){
   var qm=new Map(e.queries.map(function(q){return [q.id,q];}));
@@ -633,7 +699,7 @@ function renderFull(e,a){
       '<div><b>Main Intent</b><div class="hint">'+esc(a.intent.j.main_intent||"—")+'</div></div>'+
       '<div><b>Mandatory Variants</b><div class="hint">'+esc(vs.map(function(q){return q.normalized;}).join("، ")||"—")+'</div></div>'+
       '<div><b>Core / Important Concepts</b><div class="hint">'+esc(important.map(function(c){return c.key;}).join("، ")||"—")+'</div></div>'+
-    '</div><div class="notice">این خروجی فقط Keyword Importance است؛ نه Execution، نه SEO Opportunity و نه پیشنهاد ساخت صفحه جدید.</div></div>';
+    '</div><div class="notice">این خروجی فقط Keyword Importance است؛ نه Execution، نه SEO Opportunity و نه پیشنهاد ساخت صفحه جدید.</div></div>'+humanReadableBrief(e,a);
 }
 
 async function run(mode,src){
