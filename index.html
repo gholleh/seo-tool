@@ -218,7 +218,7 @@ var providers={
 var defaults={
   relevance:"از context_top_queries هویت غالب این URL را بفهم. برای هر query ID دقیقاً یکی از Relevant، Adjacent یا Irrelevant برگردان. هیچ query یا metric جدید نساز. خروجی فقط JSON با شکل {\"items\":[{\"id\":\"q1\",\"label\":\"Relevant\",\"reason\":\"...\",\"confidence\":0.9}]} باشد.",
   classification:"فقط phraseهای داده‌شده را طبقه‌بندی و در conceptهای معنایی گروه‌بندی کن. type باید یکی از allowed_types باشد. هیچ phrase یا metric جدید نساز. همه IDها دقیقاً یک‌بار برگردند. خروجی فقط JSON با شکل {\"items\":[{\"id\":\"p1\",\"type\":\"Core Entity\",\"concept_key\":\"...\",\"confidence\":0.9}]} باشد.",
-  intent:"فقط از query_id و concept_keyهای ورودی انتخاب کن. main_intent، یک primary_query_id، حداکثر سه variant_query_ids و برای همه conceptها importance از Core/Important/Secondary/Conditional برگردان. Opportunity یا Position را به‌عنوان اهمیت تقاضا استفاده نکن. خروجی فقط JSON باشد."
+  intent:"فقط از query_id و concept_keyهای ورودی انتخاب کن. Opportunity یا Position را به‌عنوان اهمیت تقاضا استفاده نکن. خروجی فقط JSON و دقیقاً با این schema باشد: {\"main_intent\":\"...\",\"primary_query_id\":\"q1\",\"variant_query_ids\":[\"q2\"],\"concept_importance\":[{\"concept_key\":\"exact input concept key\",\"importance\":\"Core\"}]}. concept_importance حتماً ARRAY باشد، نه object/map. برای هر concept ورودی دقیقاً یک آیتم برگردان و هیچ ID یا metric جدید نساز."
 };
 var allowedTypes=["Core Entity","Semantic Concept","Temporal Qualifier","Modifier","Brand","Product / Model Entity","Location","Content Format","Action / Sub-intent","Question Pattern"];
 var allowedImp=["Core","Important","Secondary","Conditional"];
@@ -497,6 +497,20 @@ function buildConcepts(cd,imp){
   });
   return res.sort(function(a,b){return b.impressions-a.impressions;});
 }
+function normalizeConceptImportance(raw){
+  if(Array.isArray(raw))return raw;
+  if(raw && typeof raw==="object"){
+    return Object.keys(raw).map(function(key){
+      var value=raw[key];
+      if(typeof value==="string")return {concept_key:key,importance:value};
+      if(value && typeof value==="object" && typeof value.importance==="string"){
+        return {concept_key:value.concept_key||key,importance:value.importance};
+      }
+      throw ce("ERROR_AI_INVALID_RESPONSE","concept_importance object قابل تبدیل قطعی نیست.");
+    });
+  }
+  throw ce("ERROR_AI_INVALID_RESPONSE","concept_importance باید array یا object map قابل‌تبدیل باشد.");
+}
 async function intent(e,cd){
   report("concept","running","بازمحاسبه دیتایی");
   var pre=buildConcepts(cd,null);
@@ -505,22 +519,40 @@ async function intent(e,cd){
   report("intent","running","در حال انتخاب");
   var qc=cd.rq.slice(0,60);
   if(qc.length<3)throw ce("INSUFFICIENT_DATA_FOR_PRIMARY_KEYWORD","حداقل سه Query مرتبط لازم است.");
-  var j=await ai("intent",{task:"intent_primary_variants_importance",allowed_importance:allowedImp,query_candidates:qc.map(function(q){
+  var j=await ai("intent",{task:"intent_primary_variants_importance",expected_schema:{
+    main_intent:"string",
+    primary_query_id:"existing query id",
+    variant_query_ids:["existing query id; max 3"],
+    concept_importance:[{concept_key:"exact existing concept key",importance:"Core|Important|Secondary|Conditional"}]
+  },allowed_importance:allowedImp,query_candidates:qc.map(function(q){
     return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position,token_count:q.tokens.length};
   }),concepts:pre.map(function(c){
     return {concept_key:c.key,type:c.type,query_count:c.count,impressions:c.impressions,coverage_percent:Number(c.share.toFixed(1)),wordings:c.words.slice(0,5).map(function(w){return w.text;})};
   })});
+  if(!j || typeof j!=="object" || Array.isArray(j))throw ce("ERROR_AI_INVALID_RESPONSE","Intent response باید JSON object باشد.");
+  if(typeof j.main_intent!=="string" || !j.main_intent.trim())throw ce("ERROR_AI_INVALID_RESPONSE","main_intent نامعتبر است.");
+  if(typeof j.primary_query_id!=="string")throw ce("ERROR_AI_INVALID_RESPONSE","primary_query_id نامعتبر است.");
+  if(j.variant_query_ids==null)j.variant_query_ids=[];
+  if(!Array.isArray(j.variant_query_ids))throw ce("ERROR_AI_INVALID_RESPONSE","variant_query_ids باید array باشد.");
   var qids=new Set(qc.map(function(q){return q.id;}));
   if(!qids.has(j.primary_query_id))throw ce("ERROR_AI_UNKNOWN_QUERY_ID","Primary ID در داده نبود.");
-  var vars=Array.from(new Set(j.variant_query_ids||[])).filter(function(x){return x!==j.primary_query_id;});
-  if(vars.length>3||vars.some(function(x){return !qids.has(x);} ))throw ce("ERROR_AI_INVALID_RESPONSE","Mandatory Variants نامعتبر");
-  var cset=new Set(pre.map(function(c){return c.key;})),items=(j.concept_importance||[]).map(function(x){return {id:x.concept_key,importance:x.importance};});
+  var vars=Array.from(new Set(j.variant_query_ids)).filter(function(x){return x!==j.primary_query_id;});
+  if(vars.length>3||vars.some(function(x){return typeof x!=="string"||!qids.has(x);} ))throw ce("ERROR_AI_INVALID_RESPONSE","Mandatory Variants نامعتبر");
+  var normalizedImportance=normalizeConceptImportance(j.concept_importance);
+  var cset=new Set(pre.map(function(c){return c.key;}));
+  var items=normalizedImportance.map(function(x){
+    if(!x || typeof x.concept_key!=="string" || typeof x.importance!=="string")throw ce("ERROR_AI_INVALID_RESPONSE","concept_importance item نامعتبر است.");
+    return {id:x.concept_key,importance:x.importance};
+  });
   exactIds(items,cset,"importance");
-  var im={};(j.concept_importance||[]).forEach(function(x){
-    if(allowedImp.indexOf(x.importance)<0)throw ce("ERROR_AI_INVALID_RESPONSE","Importance نامعتبر");
+  var im={};
+  normalizedImportance.forEach(function(x){
+    if(allowedImp.indexOf(x.importance)<0)throw ce("ERROR_AI_INVALID_RESPONSE","Importance نامعتبر: "+x.importance);
     im[x.concept_key]=x.importance;
   });
-  report("intent","done",j.main_intent||"done");
+  j.concept_importance=normalizedImportance;
+  j.variant_query_ids=vars;
+  report("intent","done",j.main_intent);
   return {j:j,vars:vars,concepts:buildConcepts(cd,im)};
 }
 function representativeQueries(cd,it){
