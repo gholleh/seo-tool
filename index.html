@@ -475,11 +475,14 @@ function parseModelJson(text){
 }
 async function aiRequest(stage,payload,strictRetry){
   var c=settings.stages[stage],k=keys[stage].trim(),base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
-  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},c.timeout||120000);
+  var timeout=Math.max(15000,Math.min(Number(c.timeout)||120000,90000));
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},timeout);
   try{
     var h={"content-type":"application/json","Authorization":"Bearer "+k};
     if(c.provider==="openrouter")h["X-Title"]="SEO Keyword Intelligence";
     var messages=[{role:"system",content:c.prompt}];
+    if(stage==="relevance")messages.push({role:"system",content:"پاسخ را بسیار فشرده نگه دار. برای هر آیتم فقط id، label و confidence کافی است؛ reason را حذف کن یا حداکثر ۵ کلمه بنویس. هیچ توضیح خارج از JSON نده."});
+    if(stage==="classification")messages.push({role:"system",content:"پاسخ را بسیار فشرده نگه دار. برای هر آیتم فقط id، type، concept_key و confidence بده. هیچ توضیح خارج از JSON نده."});
     if(strictRetry)messages.push({role:"system",content:"پاسخ قبلی از نظر JSON نامعتبر بود. این بار فقط و فقط یک JSON معتبر مطابق schema خواسته‌شده برگردان؛ بدون Markdown، بدون code fence و بدون متن قبل یا بعد از JSON."});
     messages.push({role:"user",content:JSON.stringify(payload)});
     var r=await fetch(base+"/chat/completions",{method:"POST",headers:h,signal:ctrl.signal,body:JSON.stringify({
@@ -490,7 +493,7 @@ async function aiRequest(stage,payload,strictRetry){
     if(!t)throw ce("ERROR_AI_INVALID_RESPONSE","پاسخ مدل خالی بود.");
     return t;
   }catch(e){
-    if(e&&e.name==="AbortError")throw ce("ERROR_PROVIDER_TIMEOUT","زمان پاسخ مدل تمام شد.");
+    if(e&&e.name==="AbortError")throw ce("ERROR_PROVIDER_TIMEOUT","این batch بعد از "+Math.round(timeout/1000)+" ثانیه پاسخ نگرفت.");
     throw e;
   }finally{clearTimeout(timer);}
 }
@@ -516,23 +519,55 @@ function exactIds(items,allowed,label){
   });
   if(seen.size!==allowed.size)throw ce("ERROR_AI_MISSING_IDS",label+" — همه IDها برنگشتند.");
 }
-async function relevance(e){
-  var batchSize=40,totalBatches=Math.ceil(e.queries.length/batchSize);
-  report("rel","running","۰ / "+totalBatches+" batch");
-  var out={},ctx=e.queries.slice(0,25).map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position};});
-  for(var i=0,batchNo=1;i<e.queries.length;i+=batchSize,batchNo++){
-    report("rel","running",batchNo+" / "+totalBatches+" batch");
-    var b=e.queries.slice(i,i+batchSize);
-    var j=await ai("relevance",{task:"relevance",expected_schema:{items:[{id:"existing query id",label:"Relevant|Adjacent|Irrelevant",reason:"short string",confidence:"0..1"}]},context_top_queries:ctx,queries:b.map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position};})});
-    if(!j||typeof j!=="object"||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Relevance باید items array برگرداند.");
-    var allowed=new Set(b.map(function(q){return q.id;}));
-    exactIds(j.items,allowed,"relevance");
-    j.items.forEach(function(x){
-      if(["Relevant","Adjacent","Irrelevant"].indexOf(x.label)<0)throw ce("ERROR_AI_INVALID_RESPONSE","Relevance label نامعتبر");
-      out[x.id]=x;
-    });
+async function parallelPool(items,limit,worker,onProgress){
+  var next=0,done=0,results=new Array(items.length);
+  async function runner(){
+    while(true){
+      var idx=next++;
+      if(idx>=items.length)return;
+      results[idx]=await worker(items[idx],idx);
+      done++;
+      if(onProgress)onProgress(done,items.length);
+    }
   }
-  report("rel","done",e.queries.length+" query validated");
+  var workers=[],count=Math.min(Math.max(1,limit),items.length);
+  for(var i=0;i<count;i++)workers.push(runner());
+  await Promise.all(workers);
+  return results;
+}
+function stageHeartbeat(stage,total,getDone,started,model,parallel){
+  return setInterval(function(){
+    var sec=Math.max(1,Math.round((Date.now()-started)/1000));
+    report(stage,"running",getDone()+" / "+total+" batch · "+sec+"s · "+parallel+" parallel · "+model);
+  },1000);
+}
+async function relevance(e){
+  var batchSize=55,parallel=3,batches=[];
+  for(var i=0;i<e.queries.length;i+=batchSize)batches.push(e.queries.slice(i,i+batchSize));
+  var totalBatches=batches.length,out={},done=0,started=Date.now();
+  var model=(settings.stages.relevance.model||"model").split("/").pop();
+  report("rel","running","۰ / "+totalBatches+" batch · شروع");
+  var heartbeat=stageHeartbeat("rel",totalBatches,function(){return done;},started,model,parallel);
+  var ctx=e.queries.slice(0,25).map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position};});
+  try{
+    await parallelPool(batches,parallel,async function(b,idx){
+      var j=await ai("relevance",{task:"relevance",batch_index:idx+1,total_batches:totalBatches,expected_schema:{items:[{id:"existing query id",label:"Relevant|Adjacent|Irrelevant",confidence:"0..1"}]},context_top_queries:ctx,queries:b.map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position};})});
+      if(!j||typeof j!=="object"||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Relevance batch "+(idx+1)+" باید items array برگرداند.");
+      var allowed=new Set(b.map(function(q){return q.id;}));
+      exactIds(j.items,allowed,"relevance batch "+(idx+1));
+      j.items.forEach(function(x){
+        if(["Relevant","Adjacent","Irrelevant"].indexOf(x.label)<0)throw ce("ERROR_AI_INVALID_RESPONSE","Relevance label نامعتبر در batch "+(idx+1));
+        out[x.id]=x;
+      });
+      return true;
+    },function(completed,total){
+      done=completed;
+      var sec=Math.max(1,Math.round((Date.now()-started)/1000));
+      report("rel","running",completed+" / "+total+" batch · "+sec+"s · "+parallel+" parallel");
+    });
+  }finally{clearInterval(heartbeat);}
+  if(Object.keys(out).length!==e.queries.length)throw ce("ERROR_AI_MISSING_IDS","Relevance برای همه Queryها خروجی معتبر نساخت.");
+  report("rel","done",e.queries.length+" query · "+Math.round((Date.now()-started)/1000)+"s");
   return out;
 }
 function containsPhrase(q,p){return (" "+q+" ").indexOf(" "+p+" ")>=0;}
@@ -541,22 +576,31 @@ async function classify(e,rel){
   if(!rq.length)throw ce("INSUFFICIENT_RELEVANT_DATA","هیچ Query مرتبطی باقی نماند.");
   var rp=extractPhrases(rq),total=rq.reduce(function(s,q){return s+q.impressions;},0),cc=candidates(rp,settings.candidateLimit,total);
   if(!cc.length)throw ce("REVIEW_REQUIRED_CONCEPT_GROUPING","Phrase candidate کافی برای Classification پیدا نشد.");
-  var batchSize=45,totalBatches=Math.ceil(cc.length/batchSize),map={};
-  report("class","running","۰ / "+totalBatches+" batch");
-  for(var i=0,batchNo=1;i<cc.length;i+=batchSize,batchNo++){
-    report("class","running",batchNo+" / "+totalBatches+" batch");
-    var b=cc.slice(i,i+batchSize);
-    var j=await ai("classification",{task:"phrase_classification",expected_schema:{items:[{id:"existing phrase id",type:"one allowed type",concept_key:"semantic group key",confidence:"0..1"}]},allowed_types:allowedTypes,phrases:b.map(function(p){
-      return {id:p.id,phrase:p.text,n:p.n,query_count:p.queryCount,included_impressions:p.includedImpressions,concentration:Number(p.concentration.toFixed(3)),sample_queries:rq.filter(function(q){return containsPhrase(q.normalized,p.text);}).slice(0,3).map(function(q){return q.normalized;})};
-    })});
-    if(!j||typeof j!=="object"||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Classification باید items array برگرداند.");
-    var allowed=new Set(b.map(function(p){return p.id;}));exactIds(j.items,allowed,"classification");
-    j.items.forEach(function(x){
-      if(allowedTypes.indexOf(x.type)<0||typeof x.concept_key!=="string"||!x.concept_key.trim())throw ce("ERROR_AI_INVALID_RESPONSE","Classification schema نامعتبر");
-      map[x.id]=x;
+  var batchSize=50,parallel=2,batches=[],map={},done=0,started=Date.now();
+  for(var i=0;i<cc.length;i+=batchSize)batches.push(cc.slice(i,i+batchSize));
+  var totalBatches=batches.length,model=(settings.stages.classification.model||"model").split("/").pop();
+  report("class","running","۰ / "+totalBatches+" batch · شروع");
+  var heartbeat=stageHeartbeat("class",totalBatches,function(){return done;},started,model,parallel);
+  try{
+    await parallelPool(batches,parallel,async function(b,idx){
+      var j=await ai("classification",{task:"phrase_classification",batch_index:idx+1,total_batches:totalBatches,expected_schema:{items:[{id:"existing phrase id",type:"one allowed type",concept_key:"semantic group key",confidence:"0..1"}]},allowed_types:allowedTypes,phrases:b.map(function(p){
+        return {id:p.id,phrase:p.text,n:p.n,query_count:p.queryCount,included_impressions:p.includedImpressions,concentration:Number(p.concentration.toFixed(3)),sample_queries:rq.filter(function(q){return containsPhrase(q.normalized,p.text);}).slice(0,3).map(function(q){return q.normalized;})};
+      })});
+      if(!j||typeof j!=="object"||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Classification batch "+(idx+1)+" باید items array برگرداند.");
+      var allowed=new Set(b.map(function(p){return p.id;}));exactIds(j.items,allowed,"classification batch "+(idx+1));
+      j.items.forEach(function(x){
+        if(allowedTypes.indexOf(x.type)<0||typeof x.concept_key!=="string"||!x.concept_key.trim())throw ce("ERROR_AI_INVALID_RESPONSE","Classification schema نامعتبر در batch "+(idx+1));
+        map[x.id]=x;
+      });
+      return true;
+    },function(completed,totalB){
+      done=completed;
+      var sec=Math.max(1,Math.round((Date.now()-started)/1000));
+      report("class","running",completed+" / "+totalB+" batch · "+sec+"s · "+parallel+" parallel");
     });
-  }
-  report("class","done",cc.length+" phrases validated");
+  }finally{clearInterval(heartbeat);}
+  if(Object.keys(map).length!==cc.length)throw ce("ERROR_AI_MISSING_IDS","Classification برای همه Phraseها خروجی معتبر نساخت.");
+  report("class","done",cc.length+" phrases · "+Math.round((Date.now()-started)/1000)+"s");
   return {rq:rq,rp:rp,cc:cc,map:map};
 }
 function buildConcepts(cd,imp){
