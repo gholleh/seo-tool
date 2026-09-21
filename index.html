@@ -432,22 +432,79 @@ async function getModels(stage){
   modelErrors[stage]="";
   renderSettings();
 }
-async function ai(stage,payload){
+function extractBalancedJson(text){
+  var s=String(text||""),start=-1,stack=[],inString=false,escaped=false;
+  for(var i=0;i<s.length;i++){
+    var ch=s[i];
+    if(start<0){
+      if(ch==="{"||ch==="["){start=i;stack.push(ch==="{"?"}":"]");}
+      continue;
+    }
+    if(inString){
+      if(escaped){escaped=false;continue;}
+      if(ch==="\\"){escaped=true;continue;}
+      if(ch==='"'){inString=false;}
+      continue;
+    }
+    if(ch==='"'){inString=true;continue;}
+    if(ch==="{"||ch==="["){stack.push(ch==="{"?"}":"]");continue;}
+    if(ch==="}"||ch==="]"){
+      if(!stack.length||stack[stack.length-1]!==ch)return null;
+      stack.pop();
+      if(!stack.length)return s.slice(start,i+1);
+    }
+  }
+  return null;
+}
+function parseModelJson(text){
+  var s=String(text==null?"":text).replace(/^\uFEFF/,"").trim();
+  if(!s)throw ce("ERROR_AI_INVALID_RESPONSE","پاسخ مدل خالی بود.");
+  var candidates=[s];
+  var fence=s.match(/\`\`\`(?:json)?\s*([\s\S]*?)\`\`\`/i);
+  if(fence&&fence[1])candidates.push(fence[1].trim());
+  var balanced=extractBalancedJson(s);
+  if(balanced)candidates.push(balanced);
+  var seen=new Set();
+  for(var i=0;i<candidates.length;i++){
+    var c=candidates[i];
+    if(!c||seen.has(c))continue;
+    seen.add(c);
+    try{return JSON.parse(c);}catch(e){}
+  }
+  throw ce("ERROR_AI_INVALID_RESPONSE","مدل JSON معتبر برنگرداند؛ پاسخ خام قابل تبدیل قطعی نبود.");
+}
+async function aiRequest(stage,payload,strictRetry){
   var c=settings.stages[stage],k=keys[stage].trim(),base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
-  if(!k||!c.model.trim()||!base)throw ce("AI_NOT_CONFIGURED","Provider / Model / API Key در "+stageNames[stage]+" کامل نیست.");
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},c.timeout||120000);
   try{
     var h={"content-type":"application/json","Authorization":"Bearer "+k};
     if(c.provider==="openrouter")h["X-Title"]="SEO Keyword Intelligence";
+    var messages=[{role:"system",content:c.prompt}];
+    if(strictRetry)messages.push({role:"system",content:"پاسخ قبلی از نظر JSON نامعتبر بود. این بار فقط و فقط یک JSON معتبر مطابق schema خواسته‌شده برگردان؛ بدون Markdown، بدون code fence و بدون متن قبل یا بعد از JSON."});
+    messages.push({role:"user",content:JSON.stringify(payload)});
     var r=await fetch(base+"/chat/completions",{method:"POST",headers:h,signal:ctrl.signal,body:JSON.stringify({
-      model:c.model,temperature:Number(c.temp)||0,response_format:{type:"json_object"},
-      messages:[{role:"system",content:c.prompt},{role:"user",content:JSON.stringify(payload)}]
+      model:c.model,temperature:Number(c.temp)||0,response_format:{type:"json_object"},messages:messages
     })});
     if(!r.ok)throw ce("ERROR_PROVIDER_UNAVAILABLE",r.status+" — "+(await r.text()).slice(0,240));
     var j=await r.json(),t=j&&j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content;
     if(!t)throw ce("ERROR_AI_INVALID_RESPONSE","پاسخ مدل خالی بود.");
-    try{return JSON.parse(String(t).trim());}catch(e){throw ce("ERROR_AI_INVALID_RESPONSE","مدل JSON معتبر برنگرداند.");}
+    return t;
+  }catch(e){
+    if(e&&e.name==="AbortError")throw ce("ERROR_PROVIDER_TIMEOUT","زمان پاسخ مدل تمام شد.");
+    throw e;
   }finally{clearTimeout(timer);}
+}
+async function ai(stage,payload){
+  var c=settings.stages[stage],k=keys[stage].trim(),base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
+  if(!k||!c.model.trim()||!base)throw ce("AI_NOT_CONFIGURED","Provider / Model / API Key در "+stageNames[stage]+" کامل نیست.");
+  var first=await aiRequest(stage,payload,false);
+  try{return parseModelJson(first);}catch(e){
+    if(!e||e.code!=="ERROR_AI_INVALID_RESPONSE")throw e;
+  }
+  var second=await aiRequest(stage,payload,true);
+  try{return parseModelJson(second);}catch(e){
+    throw ce("ERROR_AI_INVALID_RESPONSE","مدل بعد از یک retry کنترل‌شده هم JSON معتبر برنگرداند.");
+  }
 }
 function exactIds(items,allowed,label){
   if(!Array.isArray(items))throw ce("ERROR_AI_INVALID_RESPONSE",label+" items missing");
@@ -460,11 +517,14 @@ function exactIds(items,allowed,label){
   if(seen.size!==allowed.size)throw ce("ERROR_AI_MISSING_IDS",label+" — همه IDها برنگشتند.");
 }
 async function relevance(e){
-  report("rel","running","در حال تحلیل");
+  var batchSize=40,totalBatches=Math.ceil(e.queries.length/batchSize);
+  report("rel","running","۰ / "+totalBatches+" batch");
   var out={},ctx=e.queries.slice(0,25).map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position};});
-  for(var i=0;i<e.queries.length;i+=70){
-    var b=e.queries.slice(i,i+70);
-    var j=await ai("relevance",{task:"relevance",context_top_queries:ctx,queries:b.map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position};})});
+  for(var i=0,batchNo=1;i<e.queries.length;i+=batchSize,batchNo++){
+    report("rel","running",batchNo+" / "+totalBatches+" batch");
+    var b=e.queries.slice(i,i+batchSize);
+    var j=await ai("relevance",{task:"relevance",expected_schema:{items:[{id:"existing query id",label:"Relevant|Adjacent|Irrelevant",reason:"short string",confidence:"0..1"}]},context_top_queries:ctx,queries:b.map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position};})});
+    if(!j||typeof j!=="object"||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Relevance باید items array برگرداند.");
     var allowed=new Set(b.map(function(q){return q.id;}));
     exactIds(j.items,allowed,"relevance");
     j.items.forEach(function(x){
@@ -472,25 +532,31 @@ async function relevance(e){
       out[x.id]=x;
     });
   }
-  report("rel","done","validated");
+  report("rel","done",e.queries.length+" query validated");
   return out;
 }
 function containsPhrase(q,p){return (" "+q+" ").indexOf(" "+p+" ")>=0;}
 async function classify(e,rel){
-  report("class","running","در حال تحلیل");
   var rq=e.queries.filter(function(q){return rel[q.id]&&rel[q.id].label==="Relevant";});
   if(!rq.length)throw ce("INSUFFICIENT_RELEVANT_DATA","هیچ Query مرتبطی باقی نماند.");
   var rp=extractPhrases(rq),total=rq.reduce(function(s,q){return s+q.impressions;},0),cc=candidates(rp,settings.candidateLimit,total);
-  var j=await ai("classification",{task:"phrase_classification",allowed_types:allowedTypes,phrases:cc.map(function(p){
-    return {id:p.id,phrase:p.text,n:p.n,query_count:p.queryCount,included_impressions:p.includedImpressions,concentration:Number(p.concentration.toFixed(3)),sample_queries:rq.filter(function(q){return containsPhrase(q.normalized,p.text);}).slice(0,3).map(function(q){return q.normalized;})};
-  })});
-  var allowed=new Set(cc.map(function(p){return p.id;}));exactIds(j.items,allowed,"classification");
-  var map={};
-  j.items.forEach(function(x){
-    if(allowedTypes.indexOf(x.type)<0||!x.concept_key)throw ce("ERROR_AI_INVALID_RESPONSE","Classification schema نامعتبر");
-    map[x.id]=x;
-  });
-  report("class","done",cc.length+" phrases");
+  if(!cc.length)throw ce("REVIEW_REQUIRED_CONCEPT_GROUPING","Phrase candidate کافی برای Classification پیدا نشد.");
+  var batchSize=45,totalBatches=Math.ceil(cc.length/batchSize),map={};
+  report("class","running","۰ / "+totalBatches+" batch");
+  for(var i=0,batchNo=1;i<cc.length;i+=batchSize,batchNo++){
+    report("class","running",batchNo+" / "+totalBatches+" batch");
+    var b=cc.slice(i,i+batchSize);
+    var j=await ai("classification",{task:"phrase_classification",expected_schema:{items:[{id:"existing phrase id",type:"one allowed type",concept_key:"semantic group key",confidence:"0..1"}]},allowed_types:allowedTypes,phrases:b.map(function(p){
+      return {id:p.id,phrase:p.text,n:p.n,query_count:p.queryCount,included_impressions:p.includedImpressions,concentration:Number(p.concentration.toFixed(3)),sample_queries:rq.filter(function(q){return containsPhrase(q.normalized,p.text);}).slice(0,3).map(function(q){return q.normalized;})};
+    })});
+    if(!j||typeof j!=="object"||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Classification باید items array برگرداند.");
+    var allowed=new Set(b.map(function(p){return p.id;}));exactIds(j.items,allowed,"classification");
+    j.items.forEach(function(x){
+      if(allowedTypes.indexOf(x.type)<0||typeof x.concept_key!=="string"||!x.concept_key.trim())throw ce("ERROR_AI_INVALID_RESPONSE","Classification schema نامعتبر");
+      map[x.id]=x;
+    });
+  }
+  report("class","done",cc.length+" phrases validated");
   return {rq:rq,rp:rp,cc:cc,map:map};
 }
 function buildConcepts(cd,imp){
