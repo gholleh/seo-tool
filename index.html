@@ -418,12 +418,41 @@ async function engine(src){
   return {name:name,queries:qs,phrases:ps,candidates:cs,summary:{valid:qs.length,visible:vi,clicks:vc,total:parsed.total,coverage:parsed.total?vi/parsed.total*100:null,maxQueryLength:Math.max.apply(null,qs.map(function(q){return q.tokens.length;}))}};
 }
 
+function cleanApiKey(raw){
+  var s=String(raw==null?"":raw)
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g,"")
+    .replace(/\u00A0/g," ")
+    .trim();
+  if(!s)return "";
+  if(/[\r\n\t ]/.test(s))throw ce("ERROR_API_KEY_INVALID_CHARS","API Key شامل فاصله یا خط‌شکست داخل کلید است. کلید را دوباره مستقیماً از OpenRouter کپی کن.");
+  if(!/^[\x21-\x7E]+$/.test(s))throw ce("ERROR_API_KEY_INVALID_CHARS","API Key شامل کاراکتر غیر ASCII است؛ معمولاً خط‌تیره یا کاراکتر مخفی هنگام Copy/Paste تغییر کرده. کلید را دوباره از OpenRouter کپی کن.");
+  return s;
+}
+function safeHeaders(stage,withJson){
+  var k=cleanApiKey(keys[stage]);
+  var h={};
+  if(withJson)h["content-type"]="application/json";
+  if(k)h["Authorization"]="Bearer "+k;
+  if(settings.stages[stage].provider==="openrouter")h["X-Title"]="SEO Keyword Intelligence";
+  try{
+    Object.keys(h).forEach(function(name){
+      if(!/^[\x00-\xFF]*$/.test(String(h[name])))throw ce("ERROR_HEADER_INVALID_CHAR","Header "+name+" شامل کاراکتر نامعتبر است.");
+    });
+  }catch(e){throw e;}
+  return h;
+}
 async function getModels(stage){
   var c=settings.stages[stage],base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
   if(!base)throw ce("ERROR_MODEL_LIST_UNAVAILABLE","Endpoint خالی است.");
-  var h={},k=keys[stage].trim();if(k)h.Authorization="Bearer "+k;
+  var h;
+  try{h=safeHeaders(stage,false);}catch(e){throw e;}
   var r;
-  try{r=await fetch(base+"/models",{headers:h});}catch(e){throw ce("ERROR_MODEL_LIST_UNAVAILABLE",e.message);}
+  try{r=await fetch(base+"/models",{headers:h});}
+  catch(e){
+    if(e&&e.code)throw e;
+    if(e instanceof TypeError && /headers|ISO-8859-1|ByteString|code point/i.test(String(e.message||"")))throw ce("ERROR_HEADER_INVALID_CHAR","یکی از Headerهای درخواست نامعتبر است. API Key را دوباره از OpenRouter کپی کن.");
+    throw ce("ERROR_MODEL_LIST_UNAVAILABLE",e.message);
+  }
   if(!r.ok)throw ce("ERROR_MODEL_LIST_UNAVAILABLE",r.status+" — "+(await r.text()).slice(0,160));
   var j=await r.json(),a=Array.isArray(j.data)?j.data:[];
   a=a.map(function(x){return {id:String(x.id||""),name:String(x.name||x.id||"")};}).filter(function(x){return x.id;});
@@ -474,12 +503,11 @@ function parseModelJson(text){
   throw ce("ERROR_AI_INVALID_RESPONSE","مدل JSON معتبر برنگرداند؛ پاسخ خام قابل تبدیل قطعی نبود.");
 }
 async function aiRequest(stage,payload,strictRetry){
-  var c=settings.stages[stage],k=keys[stage].trim(),base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
+  var c=settings.stages[stage],base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
   var timeout=Math.max(15000,Math.min(Number(c.timeout)||120000,90000));
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},timeout);
   try{
-    var h={"content-type":"application/json","Authorization":"Bearer "+k};
-    if(c.provider==="openrouter")h["X-Title"]="SEO Keyword Intelligence";
+    var h=safeHeaders(stage,true);
     var messages=[{role:"system",content:c.prompt}];
     if(stage==="relevance")messages.push({role:"system",content:"پاسخ را بسیار فشرده نگه دار. برای هر آیتم فقط id، label و confidence کافی است؛ reason را حذف کن یا حداکثر ۵ کلمه بنویس. هیچ توضیح خارج از JSON نده."});
     if(stage==="classification")messages.push({role:"system",content:"پاسخ را بسیار فشرده نگه دار. برای هر آیتم فقط id، type، concept_key و confidence بده. هیچ توضیح خارج از JSON نده."});
@@ -494,11 +522,14 @@ async function aiRequest(stage,payload,strictRetry){
     return t;
   }catch(e){
     if(e&&e.name==="AbortError")throw ce("ERROR_PROVIDER_TIMEOUT","این batch بعد از "+Math.round(timeout/1000)+" ثانیه پاسخ نگرفت.");
+    if(e&&e.code)throw e;
+    if(e instanceof TypeError && /headers|ISO-8859-1|ByteString|code point/i.test(String(e.message||"")))throw ce("ERROR_HEADER_INVALID_CHAR","یکی از Headerهای درخواست نامعتبر است. API Key را دوباره مستقیماً از OpenRouter کپی کن.");
     throw e;
   }finally{clearTimeout(timer);}
 }
 async function ai(stage,payload){
-  var c=settings.stages[stage],k=keys[stage].trim(),base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
+  var c=settings.stages[stage],base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
+  var k=cleanApiKey(keys[stage]);
   if(!k||!c.model.trim()||!base)throw ce("AI_NOT_CONFIGURED","Provider / Model / API Key در "+stageNames[stage]+" کامل نیست.");
   var first=await aiRequest(stage,payload,false);
   try{return parseModelJson(first);}catch(e){
