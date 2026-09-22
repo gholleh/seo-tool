@@ -233,7 +233,7 @@ var providers={
   custom:{label:"OpenAI-compatible Endpoint",endpoint:""}
 };
 var defaults={
-  relevance:"از context_top_queries هویت غالب این URL را بفهم. برای هر query ID دقیقاً یکی از Relevant، Adjacent یا Irrelevant برگردان. هیچ query یا metric جدید نساز. خروجی فقط JSON با شکل {\"items\":[{\"id\":\"q1\",\"label\":\"Relevant\",\"reason\":\"...\",\"confidence\":0.9}]} باشد.",
+  relevance:"هویت غالب URL را از context یا examples بفهم. فقط IDهایی را که در ورودی داده شده‌اند طبقه‌بندی کن؛ ID می‌تواند Query یا Cluster باشد. برای هر ID دقیقاً یکی از Relevant، Adjacent یا Irrelevant برگردان. هیچ query، cluster یا metric جدید نساز. خروجی فقط JSON با شکل {\"items\":[{\"id\":\"input_id\",\"label\":\"Relevant\",\"confidence\":0.9}]} باشد.",
   classification:"فقط phraseهای داده‌شده را طبقه‌بندی و در conceptهای معنایی گروه‌بندی کن. type باید یکی از allowed_types باشد. هیچ phrase یا metric جدید نساز. همه IDها دقیقاً یک‌بار برگردند. خروجی فقط JSON با شکل {\"items\":[{\"id\":\"p1\",\"type\":\"Core Entity\",\"concept_key\":\"...\",\"confidence\":0.9}]} باشد.",
   intent:"فقط از query_id و concept_keyهای ورودی انتخاب کن. Opportunity یا Position را به‌عنوان اهمیت تقاضا استفاده نکن. main_intent را کوتاه، دقیق و به زبان فارسی بنویس. خروجی فقط JSON و دقیقاً با این schema باشد: {\"main_intent\":\"...\",\"primary_query_id\":\"q1\",\"variant_query_ids\":[\"q2\"],\"concept_importance\":[{\"concept_key\":\"exact input concept key\",\"importance\":\"Core\"}]}. concept_importance حتماً ARRAY باشد، نه object/map. برای هر concept ورودی دقیقاً یک آیتم برگردان و هیچ ID یا metric جدید نساز."
 };
@@ -554,16 +554,16 @@ function isPuterRateLimit(e){
   var s=String((e&&e.code)||"")+" "+String((e&&e.message)||e||"");
   return /upstream_rate_limited|too_many_requests|rate.?limit|\b429\b/i.test(s);
 }
-async function puterSingleRequest(stage,payload,strictRetry){
+async function puterSingleRequest(stage,payload,strictRetry,modelId){
   var c=settings.stages[stage];
   var timeout=Math.max(15000,Math.min(Number(c.timeout)||90000,90000));
   var timer;
   var timeoutPromise=new Promise(function(_,reject){
-    timer=setTimeout(function(){reject(ce("ERROR_PROVIDER_TIMEOUT","Puter بعد از "+Math.round(timeout/1000)+" ثانیه پاسخ نداد."));},timeout);
+    timer=setTimeout(function(){reject(ce("ERROR_PROVIDER_TIMEOUT","مدل "+modelId+" بعد از "+Math.round(timeout/1000)+" ثانیه پاسخ نداد."));},timeout);
   });
   try{
     var request=puter.ai.chat(buildAiMessages(stage,payload,strictRetry),{
-      model:c.model,
+      model:modelId,
       normalize:true,
       temperature:Number(c.temp)||0,
       max_tokens:12000
@@ -577,26 +577,45 @@ async function puterSingleRequest(stage,payload,strictRetry){
 async function puterAiRequest(stage,payload,strictRetry){
   var c=settings.stages[stage];
   if(!window.puter||!puter.ai||typeof puter.ai.chat!=="function")throw ce("ERROR_PROVIDER_UNAVAILABLE","Puter.js در مرورگر در دسترس نیست.");
-  if(!c.model)await loadPuterFreeModels(stage,false);
-  if(!String(c.model).endsWith(":free"))throw ce("ERROR_NONFREE_MODEL_SELECTED","برای Provider رایگان Puter فقط مدل‌های :free مجازند.");
-  var waits=[0,15000,45000],last=null;
-  for(var attempt=0;attempt<waits.length;attempt++){
-    if(waits[attempt]){
-      var stageId=stage==="relevance"?"rel":stage==="classification"?"class":"intent";
-      report(stageId,"running","Rate limit · retry در "+Math.round(waits[attempt]/1000)+"s");
-      await sleep(waits[attempt]);
-    }
+  if(!models[stage]||!models[stage].length)await loadPuterFreeModels(stage,false);
+  var pool=models[stage].filter(function(m){return String(m.id||"").endsWith(":free");}).slice(0,8);
+  if(!pool.length)throw ce("ERROR_NO_FREE_PUTER_MODEL","هیچ مدل رایگان زنده‌ای پیدا نشد.");
+  var preferred=c.model;
+  pool.sort(function(x,y){
+    if(x.id===preferred)return -1;
+    if(y.id===preferred)return 1;
+    return puterModelScore(y)-puterModelScore(x);
+  });
+  var last=null,maxModels=Math.min(5,pool.length);
+  for(var i=0;i<maxModels;i++){
+    var modelId=pool[i].id;
     try{
-      return await puterSingleRequest(stage,payload,strictRetry);
+      if(i>0){
+        var stageId=stage==="relevance"?"rel":stage==="classification"?"class":"intent";
+        report(stageId,"running","مدل رایگان بعدی: "+modelId.split("/").pop());
+        await sleep(1200);
+      }
+      var text=await puterSingleRequest(stage,payload,strictRetry,modelId);
+      c.model=modelId;
+      return text;
     }catch(e){
       last=e;
-      if(!isPuterRateLimit(e)) {
+      if(!isPuterRateLimit(e)){
+        if(e&&e.code==="ERROR_PROVIDER_TIMEOUT")continue;
         if(e&&e.code)throw e;
-        throw ce("ERROR_PROVIDER_UNAVAILABLE",String(e&&e.message||e));
+        continue;
       }
     }
   }
-  throw ce("ERROR_PROVIDER_RATE_LIMIT","مدل رایگان Puter بعد از retry هم محدود بود. چند دقیقه بعد دوباره اجرا کن یا یک مدل :free دیگر انتخاب کن. "+String(last&&last.message||""));
+  await sleep(8000);
+  try{
+    var fallback=pool[0].id;
+    var text=await puterSingleRequest(stage,payload,strictRetry,fallback);
+    c.model=fallback;
+    return text;
+  }catch(e){
+    throw ce("ERROR_PROVIDER_RATE_LIMIT","مدل‌های رایگان Puter همگی در محدودیت upstream هستند. این محدودیت سرویس رایگان است، نه فایل یا مرورگر. "+String((e&&e.message)||e||""));
+  }
 }
 async function aiRequest(stage,payload,strictRetry){
   var c=settings.stages[stage];
@@ -673,9 +692,78 @@ function stageHeartbeat(stage,total,getDone,started,model,parallel){
     report(stage,"running",getDone()+" / "+total+" batch · "+sec+"s · "+parallel+" parallel · "+model);
   },1000);
 }
+function relevanceClusters(e){
+  var qs=e.queries,N=qs.length,df=new Map(),stop=new Set(["و","در","به","از","با","برای","یا","که","را","روی","یک","این","آن","تا"]);
+  qs.forEach(function(q){
+    new Set(q.tokens).forEach(function(t){if(t&&!stop.has(t))df.set(t,(df.get(t)||0)+1);});
+  });
+  function tokenScore(t){
+    var d=df.get(t)||1;
+    var idf=Math.log(1+N/d);
+    var singletonPenalty=d<2?.35:1;
+    return idf*singletonPenalty+(t.length>2?.08:0);
+  }
+  var groups=new Map();
+  qs.forEach(function(q){
+    var ts=q.tokens.filter(function(t){return t&&!stop.has(t);}).slice();
+    ts.sort(function(x,y){return tokenScore(y)-tokenScore(x);});
+    var key=(ts.slice(0,2).sort().join("|")||"__core__");
+    var g=groups.get(key);
+    if(!g){g={key:key,queries:[],impressions:0};groups.set(key,g);}
+    g.queries.push(q);g.impressions+=q.impressions;
+  });
+  var arr=Array.from(groups.values()).sort(function(x,y){return y.impressions-x.impressions;});
+  var total=e.summary.visible||1,selected=[],sum=0,maxClusters=60,target=.975;
+  for(var i=0;i<arr.length;i++){
+    if(selected.length>=maxClusters)break;
+    selected.push(arr[i]);sum+=arr[i].impressions;
+    if(sum/total>=target&&selected.length>=12)break;
+  }
+  var selectedKeys=new Set(selected.map(function(g){return g.key;}));
+  var tail=arr.filter(function(g){return !selectedKeys.has(g.key);});
+  var tailIds=[];
+  tail.forEach(function(g){g.queries.forEach(function(q){tailIds.push(q.id);});});
+  var clusters=selected.map(function(g,i){
+    var reps=g.queries.slice().sort(function(x,y){return y.impressions-x.impressions;}).slice(0,6);
+    return {
+      id:"rc"+(i+1),
+      signature:g.key,
+      impressions:g.impressions,
+      query_count:g.queries.length,
+      member_ids:g.queries.map(function(q){return q.id;}),
+      examples:reps.map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions};})
+    };
+  });
+  return {clusters:clusters,tailIds:tailIds,reviewedImpressions:sum,coverage:sum/total*100};
+}
 async function relevance(e){
-  var puterSafe=settings.stages.relevance.provider==="puter";
-  var batchSize=puterSafe?80:55,parallel=puterSafe?1:3,batches=[];
+  if(settings.stages.relevance.provider==="puter"){
+    var pack=relevanceClusters(e),out={};
+    report("rel","running",pack.clusters.length+" خوشه · "+pack.coverage.toFixed(1)+"٪ Impression");
+    var j=await ai("relevance",{
+      task:"relevance_clusters",
+      instruction:"هر cluster را فقط بر اساس examples و signature به Relevant/Adjacent/Irrelevant طبقه‌بندی کن. idهای Query را طبقه‌بندی نکن.",
+      expected_schema:{items:[{id:"existing cluster id",label:"Relevant|Adjacent|Irrelevant",confidence:"0..1"}]},
+      clusters:pack.clusters.map(function(c){return {id:c.id,signature:c.signature,impressions:c.impressions,query_count:c.query_count,examples:c.examples};})
+    });
+    if(!j||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Relevance خوشه‌ای باید items array برگرداند.");
+    var allowed=new Set(pack.clusters.map(function(c){return c.id;}));
+    exactIds(j.items,allowed,"relevance clusters");
+    var labels={};
+    j.items.forEach(function(x){
+      if(["Relevant","Adjacent","Irrelevant"].indexOf(x.label)<0)throw ce("ERROR_AI_INVALID_RESPONSE","Relevance label نامعتبر");
+      labels[x.id]=x;
+    });
+    pack.clusters.forEach(function(c){
+      var x=labels[c.id];
+      c.member_ids.forEach(function(id){out[id]={id:id,label:x.label,confidence:x.confidence,cluster_id:c.id};});
+    });
+    pack.tailIds.forEach(function(id){out[id]={id:id,label:"Unreviewed",confidence:null,reason:"free_mode_tail"};});
+    report("rel","done",pack.clusters.length+" cluster · "+pack.coverage.toFixed(1)+"٪ reviewed");
+    return out;
+  }
+
+  var batchSize=55,parallel=3,batches=[];
   for(var i=0;i<e.queries.length;i+=batchSize)batches.push(e.queries.slice(i,i+batchSize));
   var totalBatches=batches.length,out={},done=0,started=Date.now();
   var model=(settings.stages.relevance.model||"model").split("/").pop();
@@ -683,16 +771,15 @@ async function relevance(e){
   var heartbeat=stageHeartbeat("rel",totalBatches,function(){return done;},started,model,parallel);
   var ctx=e.queries.slice(0,25).map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position};});
   try{
-    await parallelPool(batches,parallel,async function(b,idx){
-      var j=await ai("relevance",{task:"relevance",batch_index:idx+1,total_batches:totalBatches,expected_schema:{items:[{id:"existing query id",label:"Relevant|Adjacent|Irrelevant",confidence:"0..1"}]},context_top_queries:ctx,queries:b.map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position};})});
+    await parallelPool(batches,parallel,async function(batch,idx){
+      var j=await ai("relevance",{task:"relevance",batch_index:idx+1,total_batches:totalBatches,expected_schema:{items:[{id:"existing query id",label:"Relevant|Adjacent|Irrelevant",confidence:"0..1"}]},context_top_queries:ctx,queries:batch.map(function(q){return {id:q.id,query:q.normalized,impressions:q.impressions,position:q.position};})});
       if(!j||typeof j!=="object"||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Relevance batch "+(idx+1)+" باید items array برگرداند.");
-      var allowed=new Set(b.map(function(q){return q.id;}));
+      var allowed=new Set(batch.map(function(q){return q.id;}));
       exactIds(j.items,allowed,"relevance batch "+(idx+1));
       j.items.forEach(function(x){
         if(["Relevant","Adjacent","Irrelevant"].indexOf(x.label)<0)throw ce("ERROR_AI_INVALID_RESPONSE","Relevance label نامعتبر در batch "+(idx+1));
         out[x.id]=x;
       });
-      if(puterSafe)await sleep(1200);
       return true;
     },function(completed,total){
       done=completed;
@@ -710,24 +797,44 @@ async function classify(e,rel){
   if(!rq.length)throw ce("INSUFFICIENT_RELEVANT_DATA","هیچ Query مرتبطی باقی نماند.");
   var rp=extractPhrases(rq),total=rq.reduce(function(s,q){return s+q.impressions;},0),cc=candidates(rp,settings.candidateLimit,total);
   if(!cc.length)throw ce("REVIEW_REQUIRED_CONCEPT_GROUPING","Phrase candidate کافی برای Classification پیدا نشد.");
-  var puterSafe=settings.stages.classification.provider==="puter";
-  var batchSize=puterSafe?70:50,parallel=puterSafe?1:2,batches=[],map={},done=0,started=Date.now();
+
+  if(settings.stages.classification.provider==="puter"){
+    report("class","running",cc.length+" phrase · یک درخواست");
+    var j=await ai("classification",{
+      task:"phrase_classification",
+      expected_schema:{items:[{id:"existing phrase id",type:"one allowed type",concept_key:"semantic group key",confidence:"0..1"}]},
+      allowed_types:allowedTypes,
+      phrases:cc.map(function(p){
+        return {id:p.id,phrase:p.text,n:p.n,query_count:p.queryCount,included_impressions:p.includedImpressions,concentration:Number(p.concentration.toFixed(3)),sample_queries:rq.filter(function(q){return containsPhrase(q.normalized,p.text);}).slice(0,3).map(function(q){return q.normalized;})};
+      })
+    });
+    if(!j||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Classification باید items array برگرداند.");
+    var allowed=new Set(cc.map(function(p){return p.id;}));exactIds(j.items,allowed,"classification");
+    var map={};
+    j.items.forEach(function(x){
+      if(allowedTypes.indexOf(x.type)<0||typeof x.concept_key!=="string"||!x.concept_key.trim())throw ce("ERROR_AI_INVALID_RESPONSE","Classification schema نامعتبر");
+      map[x.id]=x;
+    });
+    report("class","done",cc.length+" phrases validated");
+    return {rq:rq,rp:rp,cc:cc,map:map};
+  }
+
+  var batchSize=50,parallel=2,batches=[],map={},done=0,started=Date.now();
   for(var i=0;i<cc.length;i+=batchSize)batches.push(cc.slice(i,i+batchSize));
   var totalBatches=batches.length,model=(settings.stages.classification.model||"model").split("/").pop();
   report("class","running","۰ / "+totalBatches+" batch · شروع");
   var heartbeat=stageHeartbeat("class",totalBatches,function(){return done;},started,model,parallel);
   try{
-    await parallelPool(batches,parallel,async function(b,idx){
-      var j=await ai("classification",{task:"phrase_classification",batch_index:idx+1,total_batches:totalBatches,expected_schema:{items:[{id:"existing phrase id",type:"one allowed type",concept_key:"semantic group key",confidence:"0..1"}]},allowed_types:allowedTypes,phrases:b.map(function(p){
+    await parallelPool(batches,parallel,async function(batch,idx){
+      var j=await ai("classification",{task:"phrase_classification",batch_index:idx+1,total_batches:totalBatches,expected_schema:{items:[{id:"existing phrase id",type:"one allowed type",concept_key:"semantic group key",confidence:"0..1"}]},allowed_types:allowedTypes,phrases:batch.map(function(p){
         return {id:p.id,phrase:p.text,n:p.n,query_count:p.queryCount,included_impressions:p.includedImpressions,concentration:Number(p.concentration.toFixed(3)),sample_queries:rq.filter(function(q){return containsPhrase(q.normalized,p.text);}).slice(0,3).map(function(q){return q.normalized;})};
       })});
       if(!j||typeof j!=="object"||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Classification batch "+(idx+1)+" باید items array برگرداند.");
-      var allowed=new Set(b.map(function(p){return p.id;}));exactIds(j.items,allowed,"classification batch "+(idx+1));
+      var allowed=new Set(batch.map(function(p){return p.id;}));exactIds(j.items,allowed,"classification batch "+(idx+1));
       j.items.forEach(function(x){
         if(allowedTypes.indexOf(x.type)<0||typeof x.concept_key!=="string"||!x.concept_key.trim())throw ce("ERROR_AI_INVALID_RESPONSE","Classification schema نامعتبر در batch "+(idx+1));
         map[x.id]=x;
       });
-      if(puterSafe)await sleep(1200);
       return true;
     },function(completed,totalB){
       done=completed;
@@ -983,7 +1090,7 @@ function renderSettings(){
         '<label>Endpoint<input data-endpoint="'+s+'" value="'+esc(c.provider==="puter"?"مدیریت‌شده توسط Puter":c.endpoint)+'" dir="ltr" '+(c.provider==="puter"?"disabled":"")+'></label>'+
         '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+(c.provider==="puter"?"نیاز ندارد":"sk-or-...")+'" '+(c.provider==="puter"?"disabled":"")+'></label>'+
       '</div>'+
-      '<div class="hint">'+(c.provider==="puter"?"بدون API Key؛ فقط مدل‌های زنده با پسوند :free استفاده می‌شوند. حالت Safe فعال است: درخواست‌ها تک‌به‌تک اجرا می‌شوند و روی Rate Limit با فاصله زمانی retry می‌شود.":c.provider==="openrouter"?"کلید OpenRouter معمولاً با sk-or- شروع می‌شود. لیست مدل‌ها مستقیماً از OpenRouter خوانده می‌شود.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
+      '<div class="hint">'+(c.provider==="puter"?"بدون API Key؛ حالت رایگان فقط ۳ تصمیم AI اصلی می‌گیرد: Relevance خوشه‌ای، Classification و Intent. روی Rate Limit بین چند مدل زنده :free جابه‌جا می‌شود.":c.provider==="openrouter"?"کلید OpenRouter معمولاً با sk-or- شروع می‌شود. لیست مدل‌ها مستقیماً از OpenRouter خوانده می‌شود.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
       '<div class="grid g2">'+
         '<div>'+
           '<div class="model-actions"><button class="btn green" data-load="'+s+'">بارگذاری / به‌روزرسانی مدل‌ها</button><input data-search="'+s+'" placeholder="جست‌وجو بین مدل‌ها" style="margin:0;flex:1;min-width:180px"></div>'+
