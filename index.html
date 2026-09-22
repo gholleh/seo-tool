@@ -273,6 +273,13 @@ function loadSettings(){
         b.stages[k].timeout=90000;
       });
       b.freeProviderVersion="puter-free-v1";
+    }
+    if(x.freePipelineVersion!=="cluster-v2"){
+      var rp=String(b.stages.relevance.prompt||"");
+      if(!rp || rp.indexOf("برای هر query ID")>=0 || rp.indexOf("context_top_queries")>=0){
+        b.stages.relevance.prompt=defaults.relevance;
+      }
+      b.freePipelineVersion="cluster-v2";
       try{localStorage.setItem("ski-v2-settings",JSON.stringify(b));}catch(ignore){}
     }
   }catch(e){}
@@ -554,6 +561,45 @@ function isPuterRateLimit(e){
   var s=String((e&&e.code)||"")+" "+String((e&&e.message)||e||"");
   return /upstream_rate_limited|too_many_requests|rate.?limit|\b429\b/i.test(s);
 }
+function contentToText(v){
+  if(v==null)return "";
+  if(typeof v==="string")return v.trim();
+  if(Array.isArray(v)){
+    return v.map(function(x){
+      if(typeof x==="string")return x;
+      if(x&&typeof x.text==="string")return x.text;
+      if(x&&typeof x.content==="string")return x.content;
+      if(x&&x.content)return contentToText(x.content);
+      return "";
+    }).filter(Boolean).join("\n").trim();
+  }
+  if(typeof v==="object"){
+    if(typeof v.text==="string")return v.text.trim();
+    if(typeof v.content==="string")return v.content.trim();
+    if(v.content)return contentToText(v.content);
+  }
+  return "";
+}
+function extractPuterResponseText(resp){
+  if(resp==null)return "";
+  if(typeof resp==="string")return resp.trim();
+  var paths=[
+    resp&&resp.message&&resp.message.content,
+    resp&&resp.choices&&resp.choices[0]&&resp.choices[0].message&&resp.choices[0].message.content,
+    resp&&resp.text,
+    resp&&resp.content,
+    resp&&resp.result&&resp.result.message&&resp.result.message.content,
+    resp&&resp.result&&resp.result.choices&&resp.result.choices[0]&&resp.result.choices[0].message&&resp.result.choices[0].message.content,
+    resp&&resp.result&&resp.result.text,
+    resp&&resp.response&&resp.response.message&&resp.response.message.content,
+    resp&&resp.response&&resp.response.text
+  ];
+  for(var i=0;i<paths.length;i++){
+    var t=contentToText(paths[i]);
+    if(t)return t;
+  }
+  return "";
+}
 async function puterSingleRequest(stage,payload,strictRetry,modelId){
   var c=settings.stages[stage];
   var timeout=Math.max(15000,Math.min(Number(c.timeout)||90000,90000));
@@ -569,9 +615,9 @@ async function puterSingleRequest(stage,payload,strictRetry,modelId){
       max_tokens:12000
     });
     var resp=await Promise.race([request,timeoutPromise]);
-    var text=typeof resp==="string"?resp:(resp&&resp.message&&resp.message.content);
-    if(!text)throw ce("ERROR_AI_INVALID_RESPONSE","Puter پاسخ متنی برنگرداند.");
-    return String(text);
+    var text=extractPuterResponseText(resp);
+    if(!text)throw ce("ERROR_AI_EMPTY_RESPONSE","مدل "+modelId+" پاسخ متنی قابل استفاده برنگرداند.");
+    return text;
   }finally{clearTimeout(timer);}
 }
 async function puterAiRequest(stage,payload,strictRetry){
@@ -600,11 +646,10 @@ async function puterAiRequest(stage,payload,strictRetry){
       return text;
     }catch(e){
       last=e;
-      if(!isPuterRateLimit(e)){
-        if(e&&e.code==="ERROR_PROVIDER_TIMEOUT")continue;
-        if(e&&e.code)throw e;
-        continue;
-      }
+      if(isPuterRateLimit(e))continue;
+      if(e&&["ERROR_PROVIDER_TIMEOUT","ERROR_AI_EMPTY_RESPONSE","ERROR_AI_INVALID_RESPONSE","ERROR_PROVIDER_UNAVAILABLE"].indexOf(e.code)>=0)continue;
+      if(e&&e.code)throw e;
+      continue;
     }
   }
   await sleep(8000);
@@ -614,7 +659,8 @@ async function puterAiRequest(stage,payload,strictRetry){
     c.model=fallback;
     return text;
   }catch(e){
-    throw ce("ERROR_PROVIDER_RATE_LIMIT","مدل‌های رایگان Puter همگی در محدودیت upstream هستند. این محدودیت سرویس رایگان است، نه فایل یا مرورگر. "+String((e&&e.message)||e||""));
+    if(isPuterRateLimit(e))throw ce("ERROR_PROVIDER_RATE_LIMIT","مدل‌های رایگان Puter همگی در محدودیت upstream هستند.");
+    throw ce("ERROR_PROVIDER_UNAVAILABLE","چند مدل رایگان Puter امتحان شدند اما پاسخ قابل استفاده ندادند: "+String((e&&e.message)||e||""));
   }
 }
 async function aiRequest(stage,payload,strictRetry){
