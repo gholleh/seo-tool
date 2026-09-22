@@ -549,11 +549,13 @@ function buildAiMessages(stage,payload,strictRetry){
   messages.push({role:"user",content:JSON.stringify(payload)});
   return messages;
 }
-async function puterAiRequest(stage,payload,strictRetry){
+function sleep(ms){return new Promise(function(resolve){setTimeout(resolve,ms);});}
+function isPuterRateLimit(e){
+  var s=String((e&&e.code)||"")+" "+String((e&&e.message)||e||"");
+  return /upstream_rate_limited|too_many_requests|rate.?limit|\b429\b/i.test(s);
+}
+async function puterSingleRequest(stage,payload,strictRetry){
   var c=settings.stages[stage];
-  if(!window.puter||!puter.ai||typeof puter.ai.chat!=="function")throw ce("ERROR_PROVIDER_UNAVAILABLE","Puter.js در مرورگر در دسترس نیست.");
-  if(!c.model)await loadPuterFreeModels(stage,false);
-  if(!String(c.model).endsWith(":free"))throw ce("ERROR_NONFREE_MODEL_SELECTED","برای Provider رایگان Puter فقط مدل‌های :free مجازند.");
   var timeout=Math.max(15000,Math.min(Number(c.timeout)||90000,90000));
   var timer;
   var timeoutPromise=new Promise(function(_,reject){
@@ -570,10 +572,31 @@ async function puterAiRequest(stage,payload,strictRetry){
     var text=typeof resp==="string"?resp:(resp&&resp.message&&resp.message.content);
     if(!text)throw ce("ERROR_AI_INVALID_RESPONSE","Puter پاسخ متنی برنگرداند.");
     return String(text);
-  }catch(e){
-    if(e&&e.code)throw e;
-    throw ce("ERROR_PROVIDER_UNAVAILABLE",String(e&&e.message||e));
   }finally{clearTimeout(timer);}
+}
+async function puterAiRequest(stage,payload,strictRetry){
+  var c=settings.stages[stage];
+  if(!window.puter||!puter.ai||typeof puter.ai.chat!=="function")throw ce("ERROR_PROVIDER_UNAVAILABLE","Puter.js در مرورگر در دسترس نیست.");
+  if(!c.model)await loadPuterFreeModels(stage,false);
+  if(!String(c.model).endsWith(":free"))throw ce("ERROR_NONFREE_MODEL_SELECTED","برای Provider رایگان Puter فقط مدل‌های :free مجازند.");
+  var waits=[0,15000,45000],last=null;
+  for(var attempt=0;attempt<waits.length;attempt++){
+    if(waits[attempt]){
+      var stageId=stage==="relevance"?"rel":stage==="classification"?"class":"intent";
+      report(stageId,"running","Rate limit · retry در "+Math.round(waits[attempt]/1000)+"s");
+      await sleep(waits[attempt]);
+    }
+    try{
+      return await puterSingleRequest(stage,payload,strictRetry);
+    }catch(e){
+      last=e;
+      if(!isPuterRateLimit(e)) {
+        if(e&&e.code)throw e;
+        throw ce("ERROR_PROVIDER_UNAVAILABLE",String(e&&e.message||e));
+      }
+    }
+  }
+  throw ce("ERROR_PROVIDER_RATE_LIMIT","مدل رایگان Puter بعد از retry هم محدود بود. چند دقیقه بعد دوباره اجرا کن یا یک مدل :free دیگر انتخاب کن. "+String(last&&last.message||""));
 }
 async function aiRequest(stage,payload,strictRetry){
   var c=settings.stages[stage];
@@ -651,7 +674,8 @@ function stageHeartbeat(stage,total,getDone,started,model,parallel){
   },1000);
 }
 async function relevance(e){
-  var batchSize=55,parallel=3,batches=[];
+  var puterSafe=settings.stages.relevance.provider==="puter";
+  var batchSize=puterSafe?80:55,parallel=puterSafe?1:3,batches=[];
   for(var i=0;i<e.queries.length;i+=batchSize)batches.push(e.queries.slice(i,i+batchSize));
   var totalBatches=batches.length,out={},done=0,started=Date.now();
   var model=(settings.stages.relevance.model||"model").split("/").pop();
@@ -668,6 +692,7 @@ async function relevance(e){
         if(["Relevant","Adjacent","Irrelevant"].indexOf(x.label)<0)throw ce("ERROR_AI_INVALID_RESPONSE","Relevance label نامعتبر در batch "+(idx+1));
         out[x.id]=x;
       });
+      if(puterSafe)await sleep(1200);
       return true;
     },function(completed,total){
       done=completed;
@@ -685,7 +710,8 @@ async function classify(e,rel){
   if(!rq.length)throw ce("INSUFFICIENT_RELEVANT_DATA","هیچ Query مرتبطی باقی نماند.");
   var rp=extractPhrases(rq),total=rq.reduce(function(s,q){return s+q.impressions;},0),cc=candidates(rp,settings.candidateLimit,total);
   if(!cc.length)throw ce("REVIEW_REQUIRED_CONCEPT_GROUPING","Phrase candidate کافی برای Classification پیدا نشد.");
-  var batchSize=50,parallel=2,batches=[],map={},done=0,started=Date.now();
+  var puterSafe=settings.stages.classification.provider==="puter";
+  var batchSize=puterSafe?70:50,parallel=puterSafe?1:2,batches=[],map={},done=0,started=Date.now();
   for(var i=0;i<cc.length;i+=batchSize)batches.push(cc.slice(i,i+batchSize));
   var totalBatches=batches.length,model=(settings.stages.classification.model||"model").split("/").pop();
   report("class","running","۰ / "+totalBatches+" batch · شروع");
@@ -701,6 +727,7 @@ async function classify(e,rel){
         if(allowedTypes.indexOf(x.type)<0||typeof x.concept_key!=="string"||!x.concept_key.trim())throw ce("ERROR_AI_INVALID_RESPONSE","Classification schema نامعتبر در batch "+(idx+1));
         map[x.id]=x;
       });
+      if(puterSafe)await sleep(1200);
       return true;
     },function(completed,totalB){
       done=completed;
@@ -956,7 +983,7 @@ function renderSettings(){
         '<label>Endpoint<input data-endpoint="'+s+'" value="'+esc(c.provider==="puter"?"مدیریت‌شده توسط Puter":c.endpoint)+'" dir="ltr" '+(c.provider==="puter"?"disabled":"")+'></label>'+
         '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+(c.provider==="puter"?"نیاز ندارد":"sk-or-...")+'" '+(c.provider==="puter"?"disabled":"")+'></label>'+
       '</div>'+
-      '<div class="hint">'+(c.provider==="puter"?"بدون API Key؛ فقط مدل‌های زنده با پسوند :free استفاده می‌شوند. در اولین استفاده ممکن است Puter از تو ورود/اجازه بخواهد.":c.provider==="openrouter"?"کلید OpenRouter معمولاً با sk-or- شروع می‌شود. لیست مدل‌ها مستقیماً از OpenRouter خوانده می‌شود.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
+      '<div class="hint">'+(c.provider==="puter"?"بدون API Key؛ فقط مدل‌های زنده با پسوند :free استفاده می‌شوند. حالت Safe فعال است: درخواست‌ها تک‌به‌تک اجرا می‌شوند و روی Rate Limit با فاصله زمانی retry می‌شود.":c.provider==="openrouter"?"کلید OpenRouter معمولاً با sk-or- شروع می‌شود. لیست مدل‌ها مستقیماً از OpenRouter خوانده می‌شود.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
       '<div class="grid g2">'+
         '<div>'+
           '<div class="model-actions"><button class="btn green" data-load="'+s+'">بارگذاری / به‌روزرسانی مدل‌ها</button><input data-search="'+s+'" placeholder="جست‌وجو بین مدل‌ها" style="margin:0;flex:1;min-width:180px"></div>'+
