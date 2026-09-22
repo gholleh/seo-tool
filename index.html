@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vazirmatn@33.0.3/Vazirmatn-font-face.css">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://js.puter.com/v2/"></script>
 <style>
 :root{
   --bg:#f5f7fb;--surface:#fff;--surface2:#f8fafc;--text:#132238;--muted:#64748b;
@@ -227,6 +228,7 @@ var stageNames={
   intent:"مرحله ۳ — Intent، Primary Keyword و Importance"
 };
 var providers={
+  puter:{label:"Puter Free — بدون API Key",endpoint:""},
   openrouter:{label:"OpenRouter",endpoint:"https://openrouter.ai/api/v1"},
   custom:{label:"OpenAI-compatible Endpoint",endpoint:""}
 };
@@ -252,7 +254,7 @@ var pstate={};
 function baseSettings(){
   var s={candidateLimit:140,stages:{}};
   stageKeys.forEach(function(k){
-    s.stages[k]={provider:"openrouter",endpoint:providers.openrouter.endpoint,model:"",prompt:defaults[k],timeout:120000,temp:0};
+    s.stages[k]={provider:"puter",endpoint:"",model:"",prompt:defaults[k],timeout:90000,temp:0};
   });
   return s;
 }
@@ -263,6 +265,16 @@ function loadSettings(){
     if(!x)return b;
     b.candidateLimit=Number(x.candidateLimit)||140;
     stageKeys.forEach(function(k){if(x.stages&&x.stages[k])b.stages[k]=Object.assign({},b.stages[k],x.stages[k]);});
+    if(x.freeProviderVersion!=="puter-free-v1"){
+      stageKeys.forEach(function(k){
+        b.stages[k].provider="puter";
+        b.stages[k].endpoint="";
+        b.stages[k].model="";
+        b.stages[k].timeout=90000;
+      });
+      b.freeProviderVersion="puter-free-v1";
+      try{localStorage.setItem("ski-v2-settings",JSON.stringify(b));}catch(ignore){}
+    }
   }catch(e){}
   return b;
 }
@@ -441,8 +453,34 @@ function safeHeaders(stage,withJson){
   }catch(e){throw e;}
   return h;
 }
+function puterModelScore(m){
+  var id=String(m.id||"").toLowerCase(),score=0;
+  if(!id.endsWith(":free"))return -1000000000;
+  if(id.indexOf("image")>=0||id.indexOf("video")>=0||id.indexOf("audio")>=0||id.indexOf("embedding")>=0||id.indexOf("rerank")>=0)score-=500;
+  if(id.indexOf("flash")>=0||id.indexOf("mini")>=0||id.indexOf("small")>=0||id.indexOf("lite")>=0)score+=60;
+  if(id.indexOf("qwen")>=0||id.indexOf("gemini")>=0||id.indexOf("glm")>=0||id.indexOf("nemotron")>=0||id.indexOf("mistral")>=0||id.indexOf("llama")>=0||id.indexOf("deepseek")>=0)score+=45;
+  if(id.indexOf("instruct")>=0||id.indexOf("chat")>=0)score+=20;
+  score+=Math.min(Number(m.context)||0,200000)/10000;
+  return score;
+}
+async function loadPuterFreeModels(stage,render){
+  if(!window.puter||!puter.ai||typeof puter.ai.listModels!=="function")throw ce("ERROR_PROVIDER_UNAVAILABLE","Puter.js بارگذاری نشد.");
+  var raw;
+  try{raw=await puter.ai.listModels();}catch(e){throw ce("ERROR_MODEL_LIST_UNAVAILABLE",String(e&&e.message||e));}
+  var free=(Array.isArray(raw)?raw:[]).filter(function(m){return String(m.id||"").endsWith(":free");});
+  free.sort(function(x,y){return puterModelScore(y)-puterModelScore(x);});
+  if(!free.length)throw ce("ERROR_NO_FREE_PUTER_MODEL","در لیست زنده Puter هیچ مدل :free فعالی پیدا نشد.");
+  models[stage]=free.map(function(m){return {id:String(m.id),name:String(m.name||m.id),provider:String(m.provider||""),context:Number(m.context)||0};});
+  var c=settings.stages[stage];
+  if(!c.model||!models[stage].some(function(m){return m.id===c.model;}))c.model=models[stage][0].id;
+  modelErrors[stage]="";
+  if(render!==false)renderSettings();
+  return c.model;
+}
 async function getModels(stage){
-  var c=settings.stages[stage],base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
+  var c=settings.stages[stage];
+  if(c.provider==="puter")return loadPuterFreeModels(stage,true);
+  var base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
   if(!base)throw ce("ERROR_MODEL_LIST_UNAVAILABLE","Endpoint خالی است.");
   var h;
   try{h=safeHeaders(stage,false);}catch(e){throw e;}
@@ -454,10 +492,10 @@ async function getModels(stage){
     throw ce("ERROR_MODEL_LIST_UNAVAILABLE",e.message);
   }
   if(!r.ok)throw ce("ERROR_MODEL_LIST_UNAVAILABLE",r.status+" — "+(await r.text()).slice(0,160));
-  var j=await r.json(),a=Array.isArray(j.data)?j.data:[];
-  a=a.map(function(x){return {id:String(x.id||""),name:String(x.name||x.id||"")};}).filter(function(x){return x.id;});
-  if(!a.length)throw ce("ERROR_MODEL_LIST_UNAVAILABLE","هیچ مدل واقعی دریافت نشد.");
-  models[stage]=a.sort(function(a,b){return a.name.localeCompare(b.name);});
+  var j=await r.json(),list=Array.isArray(j.data)?j.data:[];
+  list=list.map(function(x){return {id:String(x.id||""),name:String(x.name||x.id||"")};}).filter(function(x){return x.id;});
+  if(!list.length)throw ce("ERROR_MODEL_LIST_UNAVAILABLE","هیچ مدل واقعی دریافت نشد.");
+  models[stage]=list.sort(function(x,y){return x.name.localeCompare(y.name);});
   modelErrors[stage]="";
   renderSettings();
 }
@@ -502,19 +540,54 @@ function parseModelJson(text){
   }
   throw ce("ERROR_AI_INVALID_RESPONSE","مدل JSON معتبر برنگرداند؛ پاسخ خام قابل تبدیل قطعی نبود.");
 }
+function buildAiMessages(stage,payload,strictRetry){
+  var c=settings.stages[stage];
+  var messages=[{role:"system",content:c.prompt}];
+  if(stage==="relevance")messages.push({role:"system",content:"پاسخ را بسیار فشرده نگه دار. برای هر آیتم فقط id، label و confidence کافی است. هیچ توضیح خارج از JSON نده."});
+  if(stage==="classification")messages.push({role:"system",content:"پاسخ را بسیار فشرده نگه دار. برای هر آیتم فقط id، type، concept_key و confidence بده. هیچ توضیح خارج از JSON نده."});
+  if(strictRetry)messages.push({role:"system",content:"پاسخ قبلی JSON نامعتبر بود. فقط JSON معتبر مطابق schema برگردان؛ بدون Markdown و بدون متن اضافه."});
+  messages.push({role:"user",content:JSON.stringify(payload)});
+  return messages;
+}
+async function puterAiRequest(stage,payload,strictRetry){
+  var c=settings.stages[stage];
+  if(!window.puter||!puter.ai||typeof puter.ai.chat!=="function")throw ce("ERROR_PROVIDER_UNAVAILABLE","Puter.js در مرورگر در دسترس نیست.");
+  if(!c.model)await loadPuterFreeModels(stage,false);
+  if(!String(c.model).endsWith(":free"))throw ce("ERROR_NONFREE_MODEL_SELECTED","برای Provider رایگان Puter فقط مدل‌های :free مجازند.");
+  var timeout=Math.max(15000,Math.min(Number(c.timeout)||90000,90000));
+  var timer;
+  var timeoutPromise=new Promise(function(_,reject){
+    timer=setTimeout(function(){reject(ce("ERROR_PROVIDER_TIMEOUT","Puter بعد از "+Math.round(timeout/1000)+" ثانیه پاسخ نداد."));},timeout);
+  });
+  try{
+    var request=puter.ai.chat(buildAiMessages(stage,payload,strictRetry),{
+      model:c.model,
+      normalize:true,
+      temperature:Number(c.temp)||0,
+      max_tokens:12000
+    });
+    var resp=await Promise.race([request,timeoutPromise]);
+    var text=typeof resp==="string"?resp:(resp&&resp.message&&resp.message.content);
+    if(!text)throw ce("ERROR_AI_INVALID_RESPONSE","Puter پاسخ متنی برنگرداند.");
+    return String(text);
+  }catch(e){
+    if(e&&e.code)throw e;
+    throw ce("ERROR_PROVIDER_UNAVAILABLE",String(e&&e.message||e));
+  }finally{clearTimeout(timer);}
+}
 async function aiRequest(stage,payload,strictRetry){
-  var c=settings.stages[stage],base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
+  var c=settings.stages[stage];
+  if(c.provider==="puter")return puterAiRequest(stage,payload,strictRetry);
+  var base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
   var timeout=Math.max(15000,Math.min(Number(c.timeout)||120000,90000));
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},timeout);
   try{
     var h=safeHeaders(stage,true);
-    var messages=[{role:"system",content:c.prompt}];
-    if(stage==="relevance")messages.push({role:"system",content:"پاسخ را بسیار فشرده نگه دار. برای هر آیتم فقط id، label و confidence کافی است؛ reason را حذف کن یا حداکثر ۵ کلمه بنویس. هیچ توضیح خارج از JSON نده."});
-    if(stage==="classification")messages.push({role:"system",content:"پاسخ را بسیار فشرده نگه دار. برای هر آیتم فقط id، type، concept_key و confidence بده. هیچ توضیح خارج از JSON نده."});
-    if(strictRetry)messages.push({role:"system",content:"پاسخ قبلی از نظر JSON نامعتبر بود. این بار فقط و فقط یک JSON معتبر مطابق schema خواسته‌شده برگردان؛ بدون Markdown، بدون code fence و بدون متن قبل یا بعد از JSON."});
-    messages.push({role:"user",content:JSON.stringify(payload)});
     var r=await fetch(base+"/chat/completions",{method:"POST",headers:h,signal:ctrl.signal,body:JSON.stringify({
-      model:c.model,temperature:Number(c.temp)||0,response_format:{type:"json_object"},messages:messages
+      model:c.model,
+      temperature:Number(c.temp)||0,
+      response_format:{type:"json_object"},
+      messages:buildAiMessages(stage,payload,strictRetry)
     })});
     if(!r.ok)throw ce("ERROR_PROVIDER_UNAVAILABLE",r.status+" — "+(await r.text()).slice(0,240));
     var j=await r.json(),t=j&&j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content;
@@ -523,14 +596,19 @@ async function aiRequest(stage,payload,strictRetry){
   }catch(e){
     if(e&&e.name==="AbortError")throw ce("ERROR_PROVIDER_TIMEOUT","این batch بعد از "+Math.round(timeout/1000)+" ثانیه پاسخ نگرفت.");
     if(e&&e.code)throw e;
-    if(e instanceof TypeError && /headers|ISO-8859-1|ByteString|code point/i.test(String(e.message||"")))throw ce("ERROR_HEADER_INVALID_CHAR","یکی از Headerهای درخواست نامعتبر است. API Key را دوباره مستقیماً از OpenRouter کپی کن.");
+    if(e instanceof TypeError && /headers|ISO-8859-1|ByteString|code point/i.test(String(e.message||"")))throw ce("ERROR_HEADER_INVALID_CHAR","یکی از Headerهای درخواست نامعتبر است.");
     throw e;
   }finally{clearTimeout(timer);}
 }
 async function ai(stage,payload){
-  var c=settings.stages[stage],base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
-  var k=cleanApiKey(keys[stage]);
-  if(!k||!c.model.trim()||!base)throw ce("AI_NOT_CONFIGURED","Provider / Model / API Key در "+stageNames[stage]+" کامل نیست.");
+  var c=settings.stages[stage];
+  if(c.provider==="puter"){
+    if(!c.model)await loadPuterFreeModels(stage,false);
+  }else{
+    var base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
+    var k=cleanApiKey(keys[stage]);
+    if(!k||!c.model.trim()||!base)throw ce("AI_NOT_CONFIGURED","Provider / Model / API Key در "+stageNames[stage]+" کامل نیست.");
+  }
   var first=await aiRequest(stage,payload,false);
   try{return parseModelJson(first);}catch(e){
     if(!e||e.code!=="ERROR_AI_INVALID_RESPONSE")throw e;
@@ -872,13 +950,13 @@ function renderSettings(){
   $("stageSettings").innerHTML=stageKeys.map(function(s){
     var c=settings.stages[s],ms=models[s]||[];
     return '<div class="card stage">'+
-      '<div class="stage-header"><div><h3>'+esc(stageNames[s])+'</h3><div class="hint">AI فقط تصمیم معنایی می‌گیرد؛ عدد و Query جدید حق ندارد بسازد.</div></div><button class="btn soft" data-copy="'+s+'">اعمال Provider / Model / Key برای هر ۳ مرحله</button></div>'+
+      '<div class="stage-header"><div><h3>'+esc(stageNames[s])+'</h3><div class="hint">AI فقط تصمیم معنایی می‌گیرد؛ عدد و Query جدید حق ندارد بسازد.</div></div><button class="btn soft" data-copy="'+s+'">اعمال همین Provider / Model برای هر ۳ مرحله</button></div>'+
       '<div class="grid g3">'+
         '<label>Provider<select data-prov="'+s+'">'+Object.keys(providers).map(function(id){return '<option value="'+id+'" '+(c.provider===id?"selected":"")+'>'+esc(providers[id].label)+'</option>';}).join("")+'</select></label>'+
-        '<label>Endpoint<input data-endpoint="'+s+'" value="'+esc(c.endpoint)+'" dir="ltr"></label>'+
-        '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="sk-or-..."></label>'+
+        '<label>Endpoint<input data-endpoint="'+s+'" value="'+esc(c.provider==="puter"?"مدیریت‌شده توسط Puter":c.endpoint)+'" dir="ltr" '+(c.provider==="puter"?"disabled":"")+'></label>'+
+        '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+(c.provider==="puter"?"نیاز ندارد":"sk-or-...")+'" '+(c.provider==="puter"?"disabled":"")+'></label>'+
       '</div>'+
-      '<div class="hint">'+(c.provider==="openrouter"?"کلید OpenRouter معمولاً با sk-or- شروع می‌شود. لیست مدل‌ها مستقیماً از OpenRouter خوانده می‌شود.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
+      '<div class="hint">'+(c.provider==="puter"?"بدون API Key؛ فقط مدل‌های زنده با پسوند :free استفاده می‌شوند. در اولین استفاده ممکن است Puter از تو ورود/اجازه بخواهد.":c.provider==="openrouter"?"کلید OpenRouter معمولاً با sk-or- شروع می‌شود. لیست مدل‌ها مستقیماً از OpenRouter خوانده می‌شود.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
       '<div class="grid g2">'+
         '<div>'+
           '<div class="model-actions"><button class="btn green" data-load="'+s+'">بارگذاری / به‌روزرسانی مدل‌ها</button><input data-search="'+s+'" placeholder="جست‌وجو بین مدل‌ها" style="margin:0;flex:1;min-width:180px"></div>'+
@@ -901,6 +979,7 @@ function bindSettings(){
     el.onchange=function(){
       var s=el.dataset.prov,p=el.value;
       settings.stages[s].provider=p;settings.stages[s].endpoint=providers[p].endpoint;settings.stages[s].model="";
+      if(p==="puter")keys[s]="";
       models[s]=[];modelErrors[s]="";renderSettings();
     };
   });
