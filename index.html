@@ -173,7 +173,7 @@ textarea{min-height:145px;direction:ltr;text-align:left;font-family:ui-monospace
           <button id="fullBtn" class="btn primary">تحلیل کامل با AI</button>
           <button id="demoBtn" class="btn ghost">اجرای DEMO</button>
         </div>
-        <div class="help">برای تحلیل کامل، Provider پیشنهادی Groq Free است. در «تنظیمات AI» کلید رایگان Groq را وارد کن؛ مدل واقعی به‌صورت خودکار از API Groq انتخاب می‌شود. کلید در Local Storage ذخیره نمی‌شود.</div>
+        <div class="help">تحلیل کامل به‌صورت پیش‌فرض از LLM7 Free در حالت anonymous استفاده می‌کند و API Key لازم ندارد. Providerهای دیگر فقط در تنظیمات پیشرفته اختیاری‌اند.</div>
       </div>
 
       <div class="card">
@@ -228,7 +228,8 @@ var stageNames={
   intent:"مرحله ۳ — Intent، Primary Keyword و Importance"
 };
 var providers={
-  groq:{label:"Groq Free — پیشنهادی",endpoint:"https://api.groq.com/openai/v1"},
+  llm7:{label:"LLM7 Free — بدون API Key",endpoint:"https://api.llm7.io/v1"},
+  groq:{label:"Groq Free — با API Key",endpoint:"https://api.groq.com/openai/v1"},
   openrouter:{label:"OpenRouter",endpoint:"https://openrouter.ai/api/v1"},
   puter:{label:"Puter Free — آزمایشی",endpoint:""},
   custom:{label:"OpenAI-compatible Endpoint",endpoint:""}
@@ -255,7 +256,7 @@ var pstate={};
 function baseSettings(){
   var s={candidateLimit:140,stages:{}};
   stageKeys.forEach(function(k){
-    s.stages[k]={provider:"groq",endpoint:providers.groq.endpoint,model:"",prompt:defaults[k],timeout:90000,temp:0};
+    s.stages[k]={provider:"llm7",endpoint:providers.llm7.endpoint,model:"default",prompt:defaults[k],timeout:90000,temp:0};
   });
   return s;
 }
@@ -282,16 +283,16 @@ function loadSettings(){
       }
       b.freePipelineVersion="cluster-v2";
     }
-    if(x.providerMigrationVersion!=="groq-v1"){
+    if(x.providerMigrationVersion!=="llm7-v1"){
       stageKeys.forEach(function(k){
-        if(b.stages[k].provider==="puter" || !b.stages[k].provider){
-          b.stages[k].provider="groq";
-          b.stages[k].endpoint=providers.groq.endpoint;
-          b.stages[k].model="";
+        if(["puter","groq"].indexOf(b.stages[k].provider)>=0 || !b.stages[k].provider){
+          b.stages[k].provider="llm7";
+          b.stages[k].endpoint=providers.llm7.endpoint;
+          b.stages[k].model="default";
           b.stages[k].timeout=90000;
         }
       });
-      b.providerMigrationVersion="groq-v1";
+      b.providerMigrationVersion="llm7-v1";
       try{localStorage.setItem("ski-v2-settings",JSON.stringify(b));}catch(ignore){}
     }
   }catch(e){}
@@ -733,7 +734,11 @@ async function aiRequest(stage,payload,strictRetry){
       response_format:responseFormat,
       messages:buildAiMessages(stage,payload,strictRetry)
     })});
-    if(!r.ok)throw ce("ERROR_PROVIDER_UNAVAILABLE",r.status+" — "+(await r.text()).slice(0,240));
+    if(!r.ok){
+      var body=(await r.text()).slice(0,240);
+      if(r.status===429)throw ce("ERROR_PROVIDER_RATE_LIMIT",r.status+" — "+body);
+      throw ce("ERROR_PROVIDER_UNAVAILABLE",r.status+" — "+body);
+    }
     var j=await r.json(),t=j&&j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content;
     if(!t)throw ce("ERROR_AI_INVALID_RESPONSE","پاسخ مدل خالی بود.");
     return t;
@@ -750,13 +755,17 @@ async function ai(stage,payload){
     if(!c.model)await loadPuterFreeModels(stage,false);
   }else{
     var base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
-    var k=cleanApiKey(keys[stage]);
-    if(!k||!base)throw ce("AI_NOT_CONFIGURED","Provider / API Key در "+stageNames[stage]+" کامل نیست.");
+    if(!base)throw ce("AI_NOT_CONFIGURED","Endpoint در "+stageNames[stage]+" کامل نیست.");
+    if(c.provider!=="llm7"){
+      var k=cleanApiKey(keys[stage]);
+      if(!k)throw ce("AI_NOT_CONFIGURED","API Key در "+stageNames[stage]+" وارد نشده است.");
+    }
+    if(c.provider==="llm7" && !c.model)c.model="default";
     if(c.provider==="groq" && !c.model){
       await getModels(stage);
       c=settings.stages[stage];
     }
-    if(!c.model.trim())throw ce("AI_NOT_CONFIGURED","Model در "+stageNames[stage]+" انتخاب نشده است.");
+    if(!String(c.model||"").trim())throw ce("AI_NOT_CONFIGURED","Model در "+stageNames[stage]+" انتخاب نشده است.");
   }
   var first=await aiRequest(stage,payload,false);
   try{return parseModelJson(first);}catch(e){
@@ -844,7 +853,7 @@ function relevanceClusters(e){
   return {clusters:clusters,tailIds:tailIds,reviewedImpressions:sum,coverage:sum/total*100};
 }
 async function relevance(e){
-  if(settings.stages.relevance.provider==="puter" || settings.stages.relevance.provider==="groq"){
+  if(["puter","groq","llm7"].indexOf(settings.stages.relevance.provider)>=0){
     var pack=relevanceClusters(e),out={};
     report("rel","running",pack.clusters.length+" خوشه · "+pack.coverage.toFixed(1)+"٪ Impression");
     var j=await ai("relevance",{
@@ -905,7 +914,7 @@ async function classify(e,rel){
   var rp=extractPhrases(rq),total=rq.reduce(function(s,q){return s+q.impressions;},0),cc=candidates(rp,settings.candidateLimit,total);
   if(!cc.length)throw ce("REVIEW_REQUIRED_CONCEPT_GROUPING","Phrase candidate کافی برای Classification پیدا نشد.");
 
-  if(settings.stages.classification.provider==="puter" || settings.stages.classification.provider==="groq"){
+  if(["puter","groq","llm7"].indexOf(settings.stages.classification.provider)>=0){
     report("class","running",cc.length+" phrase · یک درخواست");
     var j=await ai("classification",{
       task:"phrase_classification",
@@ -1195,9 +1204,9 @@ function renderSettings(){
       '<div class="grid g3">'+
         '<label>Provider<select data-prov="'+s+'">'+Object.keys(providers).map(function(id){return '<option value="'+id+'" '+(c.provider===id?"selected":"")+'>'+esc(providers[id].label)+'</option>';}).join("")+'</select></label>'+
         '<label>Endpoint<input data-endpoint="'+s+'" value="'+esc(c.provider==="puter"?"مدیریت‌شده توسط Puter":c.endpoint)+'" dir="ltr" '+(c.provider==="puter"?"disabled":"")+'></label>'+
-        '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+(c.provider==="puter"?"نیاز ندارد":c.provider==="groq"?"gsk_...":"sk-or-...")+'" '+(c.provider==="puter"?"disabled":"")+'></label>'+
+        '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+((c.provider==="puter"||c.provider==="llm7")?"نیاز ندارد":c.provider==="groq"?"gsk_...":"sk-or-...")+'" '+((c.provider==="puter"||c.provider==="llm7")?"disabled":"")+'></label>'+
       '</div>'+
-      '<div class="hint">'+(c.provider==="groq"?"پیشنهادی: پلن رایگان Groq با Structured Output سخت‌گیرانه. کلید با gsk_ شروع می‌شود و فقط در حافظه همین تب نگه داشته می‌شود. مدل از لیست واقعی Groq انتخاب می‌شود.":c.provider==="puter"?"آزمایشی؛ بدون API Key اما به‌دلیل Rate Limit و ناپایداری upstream برای استفاده اصلی توصیه نمی‌شود.":c.provider==="openrouter"?"کلید OpenRouter معمولاً با sk-or- شروع می‌شود. لیست مدل‌ها مستقیماً از OpenRouter خوانده می‌شود.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
+      '<div class="hint">'+(c.provider==="llm7"?"پیش‌فرض رایگان: LLM7 anonymous از endpoint معرفی‌شده در فهرست GitHub. API Key لازم نیست؛ مدل default و JSON mode استفاده می‌شود.":c.provider==="groq"?"Groq رایگان است اما API Key می‌خواهد.":c.provider==="puter"?"آزمایشی؛ به‌دلیل ناپایداری upstream توصیه نمی‌شود.":c.provider==="openrouter"?"کلید OpenRouter معمولاً با sk-or- شروع می‌شود.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
       '<div class="grid g2">'+
         '<div>'+
           '<div class="model-actions"><button class="btn green" data-load="'+s+'">بارگذاری / به‌روزرسانی مدل‌ها</button><input data-search="'+s+'" placeholder="جست‌وجو بین مدل‌ها" style="margin:0;flex:1;min-width:180px"></div>'+
@@ -1219,8 +1228,8 @@ function bindSettings(){
   document.querySelectorAll("[data-prov]").forEach(function(el){
     el.onchange=function(){
       var s=el.dataset.prov,p=el.value;
-      settings.stages[s].provider=p;settings.stages[s].endpoint=providers[p].endpoint;settings.stages[s].model="";
-      if(p==="puter")keys[s]="";
+      settings.stages[s].provider=p;settings.stages[s].endpoint=providers[p].endpoint;settings.stages[s].model=p==="llm7"?"default":"";
+      if(p==="puter"||p==="llm7")keys[s]="";
       models[s]=[];modelErrors[s]="";renderSettings();
     };
   });
