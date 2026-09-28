@@ -631,11 +631,22 @@ function normalizeIntentObject(parsed){
   var root=parsed;
   if(parsed.result&&typeof parsed.result==="object"&&!Array.isArray(parsed.result))root=parsed.result;
   if(parsed.output&&typeof parsed.output==="object"&&!Array.isArray(parsed.output))root=parsed.output;
+  if(parsed.data&&typeof parsed.data==="object"&&!Array.isArray(parsed.data))root=parsed.data;
   var main=root.main_intent||root.intent||root.search_intent||root.mainIntent;
   var primary=root.primary_query_id||root.primary_id||root.primaryQueryId||root.primary;
+  if(primary&&typeof primary==="object")primary=extractId(primary);
   var vars=root.variant_query_ids||root.variants||root.mandatory_variants||root.variantQueryIds;
   var imp=root.concept_importance||root.importance||root.conceptImportance;
   if(Array.isArray(vars))vars=vars.map(function(v){return typeof v==="string"?v:extractId(v);}).filter(Boolean);
+  if(Array.isArray(imp)){
+    imp=imp.map(function(x){
+      if(!x||typeof x!=="object")return x;
+      return {
+        concept_key:String(x.concept_key||x.conceptKey||x.concept||x.key||x.id||"").trim(),
+        importance:String(x.importance||x.label||x.level||"").trim()
+      };
+    });
+  }
   if(main!=null||primary!=null||vars!=null||imp!=null){
     return {main_intent:main,primary_query_id:primary,variant_query_ids:vars==null?[]:vars,concept_importance:imp};
   }
@@ -870,6 +881,25 @@ async function githubFreeAi(stage,payload){
           exactIds(normalized.items,expected,stage+" "+backends[b]);
         }else if(stage==="intent"){
           if(!normalized||typeof normalized!=="object"||Array.isArray(normalized))throw ce("ERROR_AI_INVALID_RESPONSE","Intent object معتبر پیدا نشد.");
+          if(typeof normalized.main_intent!=="string"||!normalized.main_intent.trim())throw ce("ERROR_AI_INVALID_RESPONSE","main_intent معتبر نیست.");
+          if(typeof normalized.primary_query_id!=="string"||!normalized.primary_query_id.trim())throw ce("ERROR_AI_INVALID_RESPONSE","primary_query_id معتبر نیست.");
+          if(!Array.isArray(normalized.variant_query_ids))throw ce("ERROR_AI_INVALID_RESPONSE","variant_query_ids معتبر نیست.");
+          if(normalized.concept_importance==null)throw ce("ERROR_AI_INVALID_RESPONSE","concept_importance وجود ندارد.");
+          var allowedQueries=new Set((payload.query_candidates||[]).map(function(x){return String(x.id);}));
+          if(allowedQueries.size&&!allowedQueries.has(normalized.primary_query_id))throw ce("ERROR_AI_UNKNOWN_QUERY_ID","Primary ID ناشناخته است.");
+          for(var vi=0;vi<normalized.variant_query_ids.length;vi++){
+            if(allowedQueries.size&&!allowedQueries.has(String(normalized.variant_query_ids[vi])))throw ce("ERROR_AI_UNKNOWN_QUERY_ID","Variant ID ناشناخته است.");
+          }
+          var impItems=normalizeConceptImportance(normalized.concept_importance);
+          var allowedConcepts=new Set((payload.concepts||[]).map(function(x){return String(x.concept_key);}));
+          var impSeen=new Set();
+          impItems.forEach(function(x){
+            var key=String(x&&x.concept_key||"");
+            if(!key||!allowedConcepts.has(key)||impSeen.has(key)||allowedImp.indexOf(String(x.importance||""))<0)throw ce("ERROR_AI_INVALID_RESPONSE","concept_importance contract معتبر نیست.");
+            impSeen.add(key);
+          });
+          if(impSeen.size!==allowedConcepts.size)throw ce("ERROR_AI_MISSING_IDS","همه conceptها در Intent برنگشتند.");
+          normalized.concept_importance=impItems;
         }
         var sid=stage==="relevance"?"rel":stage==="classification"?"class":"intent";
         report(sid,"running",(backends[b].indexOf("pollinations")===0?"Pollinations":"LLM7")+" · پاسخ معتبر");
