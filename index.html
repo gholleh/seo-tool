@@ -173,7 +173,7 @@ textarea{min-height:145px;direction:ltr;text-align:left;font-family:ui-monospace
           <button id="fullBtn" class="btn primary">تحلیل کامل با AI</button>
           <button id="demoBtn" class="btn ghost">اجرای DEMO</button>
         </div>
-        <div class="help">تحلیل کامل به‌صورت پیش‌فرض از LLM7 Free در حالت anonymous استفاده می‌کند و API Key لازم ندارد. Providerهای دیگر فقط در تنظیمات پیشرفته اختیاری‌اند.</div>
+        <div class="help">تحلیل کامل به‌صورت پیش‌فرض از GitHub Free Auto استفاده می‌کند: Pollinations anonymous + fallback به LLM7. API Key لازم ندارد و هر خروجی قبل از استفاده با IDهای واقعی فایل اعتبارسنجی می‌شود.</div>
       </div>
 
       <div class="card">
@@ -228,10 +228,9 @@ var stageNames={
   intent:"مرحله ۳ — Intent، Primary Keyword و Importance"
 };
 var providers={
-  llm7:{label:"LLM7 Free — بدون API Key",endpoint:"https://api.llm7.io/v1"},
-  groq:{label:"Groq Free — با API Key",endpoint:"https://api.groq.com/openai/v1"},
-  openrouter:{label:"OpenRouter",endpoint:"https://openrouter.ai/api/v1"},
-  puter:{label:"Puter Free — آزمایشی",endpoint:""},
+  githubfree:{label:"GitHub Free Auto — بدون API Key",endpoint:"https://text.pollinations.ai"},
+  groq:{label:"Groq — اختیاری",endpoint:"https://api.groq.com/openai/v1"},
+  openrouter:{label:"OpenRouter — اختیاری",endpoint:"https://openrouter.ai/api/v1"},
   custom:{label:"OpenAI-compatible Endpoint",endpoint:""}
 };
 var defaults={
@@ -256,7 +255,7 @@ var pstate={};
 function baseSettings(){
   var s={candidateLimit:140,stages:{}};
   stageKeys.forEach(function(k){
-    s.stages[k]={provider:"llm7",endpoint:providers.llm7.endpoint,model:"default",prompt:defaults[k],timeout:90000,temp:0};
+    s.stages[k]={provider:"githubfree",endpoint:providers.githubfree.endpoint,model:"openai-fast",prompt:defaults[k],timeout:90000,temp:0};
   });
   return s;
 }
@@ -293,6 +292,18 @@ function loadSettings(){
         }
       });
       b.providerMigrationVersion="llm7-v1";
+      try{localStorage.setItem("ski-v2-settings",JSON.stringify(b));}catch(ignore){}
+    }
+    if(b.githubFreeMigrationVersion!=="githubfree-v3"){
+      stageKeys.forEach(function(k){
+        if(["llm7","puter","groq"].indexOf(b.stages[k].provider)>=0 || !b.stages[k].provider){
+          b.stages[k].provider="githubfree";
+          b.stages[k].endpoint=providers.githubfree.endpoint;
+          b.stages[k].model="openai-fast";
+          b.stages[k].timeout=90000;
+        }
+      });
+      b.githubFreeMigrationVersion="githubfree-v3";
       try{localStorage.setItem("ski-v2-settings",JSON.stringify(b));}catch(ignore){}
     }
   }catch(e){}
@@ -461,7 +472,7 @@ function cleanApiKey(raw){
   return s;
 }
 function safeHeaders(stage,withJson){
-  var k=cleanApiKey(keys[stage]);
+  var k=settings.stages[stage].provider==="githubfree"?"":cleanApiKey(keys[stage]);
   var h={};
   if(withJson)h["content-type"]="application/json";
   if(k)h["Authorization"]="Bearer "+k;
@@ -566,6 +577,77 @@ function parseModelJson(text){
     try{return JSON.parse(c);}catch(e){}
   }
   throw ce("ERROR_AI_INVALID_RESPONSE","مدل JSON معتبر برنگرداند؛ پاسخ خام قابل تبدیل قطعی نبود.");
+}
+function collectArrays(node,depth,out){
+  if(depth>5||node==null)return out;
+  if(Array.isArray(node)){out.push(node);node.forEach(function(x){collectArrays(x,depth+1,out);});return out;}
+  if(typeof node==="object")Object.keys(node).forEach(function(k){collectArrays(node[k],depth+1,out);});
+  return out;
+}
+function canonEnum(v,allowed){
+  var s=String(v==null?"":v).trim().toLowerCase();
+  for(var i=0;i<allowed.length;i++)if(allowed[i].toLowerCase()===s)return allowed[i];
+  return null;
+}
+function extractId(x){
+  if(!x||typeof x!=="object")return "";
+  return String(x.id||x.query_id||x.cluster_id||x.phrase_id||x.key||"").trim();
+}
+function normalizeItemArray(stage,parsed,payload){
+  var expected=(payload.clusters||payload.queries||payload.phrases||[]).map(function(x){return String(x.id);});
+  if(!expected.length)return null;
+  var expectedSet=new Set(expected);
+  var arrays=[];
+  if(Array.isArray(parsed))arrays.push(parsed);
+  if(parsed&&typeof parsed==="object"&&Array.isArray(parsed.items))arrays.unshift(parsed.items);
+  collectArrays(parsed,0,arrays);
+  var seenArrays=new Set(),unique=[];
+  arrays.forEach(function(a){if(a&& !seenArrays.has(a)){seenArrays.add(a);unique.push(a);}});
+  for(var ai=0;ai<unique.length;ai++){
+    var arr=unique[ai];
+    if(arr.length!==expected.length)continue;
+    var normalized=[],ids=new Set(),ok=true;
+    for(var i=0;i<arr.length;i++){
+      var x=arr[i],id=extractId(x);
+      if(!id||!expectedSet.has(id)||ids.has(id)){ok=false;break;}
+      ids.add(id);
+      if(stage==="relevance"){
+        var label=canonEnum(x.label||x.relevance||x.status||x.classification,["Relevant","Adjacent","Irrelevant"]);
+        if(!label){ok=false;break;}
+        normalized.push({id:id,label:label,confidence:Number.isFinite(Number(x.confidence))?Number(x.confidence):null});
+      }else if(stage==="classification"){
+        var type=canonEnum(x.type||x.semantic_type||x.semanticType||x.category,allowedTypes);
+        var concept=String(x.concept_key||x.conceptKey||x.concept||x.group_key||x.group||"").trim();
+        if(!type||!concept){ok=false;break;}
+        normalized.push({id:id,type:type,concept_key:concept,confidence:Number.isFinite(Number(x.confidence))?Number(x.confidence):null});
+      }
+    }
+    if(ok&&ids.size===expectedSet.size)return {items:normalized};
+  }
+  return null;
+}
+function normalizeIntentObject(parsed){
+  if(!parsed||typeof parsed!=="object"||Array.isArray(parsed))return parsed;
+  var root=parsed;
+  if(parsed.result&&typeof parsed.result==="object"&&!Array.isArray(parsed.result))root=parsed.result;
+  if(parsed.output&&typeof parsed.output==="object"&&!Array.isArray(parsed.output))root=parsed.output;
+  var main=root.main_intent||root.intent||root.search_intent||root.mainIntent;
+  var primary=root.primary_query_id||root.primary_id||root.primaryQueryId||root.primary;
+  var vars=root.variant_query_ids||root.variants||root.mandatory_variants||root.variantQueryIds;
+  var imp=root.concept_importance||root.importance||root.conceptImportance;
+  if(Array.isArray(vars))vars=vars.map(function(v){return typeof v==="string"?v:extractId(v);}).filter(Boolean);
+  if(main!=null||primary!=null||vars!=null||imp!=null){
+    return {main_intent:main,primary_query_id:primary,variant_query_ids:vars==null?[]:vars,concept_importance:imp};
+  }
+  return parsed;
+}
+function normalizeAiResponse(stage,parsed,payload){
+  if(stage==="relevance"||stage==="classification"){
+    var n=normalizeItemArray(stage,parsed,payload);
+    return n||parsed;
+  }
+  if(stage==="intent")return normalizeIntentObject(parsed);
+  return parsed;
 }
 function groqResponseSchema(stage){
   if(stage==="relevance")return {
@@ -717,6 +799,89 @@ async function puterAiRequest(stage,payload,strictRetry){
     throw ce("ERROR_PROVIDER_UNAVAILABLE","چند مدل رایگان Puter امتحان شدند اما پاسخ قابل استفاده ندادند: "+String((e&&e.message)||e||""));
   }
 }
+function providerTextFromBody(raw){
+  var s=String(raw==null?"":raw).trim();
+  if(!s)return "";
+  try{
+    var j=JSON.parse(s);
+    if(typeof j==="string")return j;
+    if(j&&j.error)throw ce("ERROR_PROVIDER_UNAVAILABLE",String(j.error.message||j.error||"Provider error").slice(0,220));
+    var t=j&&j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content;
+    if(t)return contentToText(t);
+    if(j&&j.message&&j.message.content)return contentToText(j.message.content);
+    if(typeof j.text==="string")return j.text;
+    if(typeof j.content==="string")return j.content;
+    if(typeof j.response==="string")return j.response;
+    // If provider already returned the requested JSON object, preserve it.
+    if(j&&typeof j==="object")return JSON.stringify(j);
+  }catch(e){
+    if(e&&e.code)throw e;
+  }
+  return s;
+}
+async function fetchTextWithTimeout(url,body,timeout){
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},timeout);
+  try{
+    var r=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},signal:ctrl.signal,body:JSON.stringify(body)});
+    var raw=await r.text();
+    if(!r.ok){
+      if(r.status===429)throw ce("ERROR_PROVIDER_RATE_LIMIT",r.status+" — "+raw.slice(0,180));
+      throw ce("ERROR_PROVIDER_UNAVAILABLE",r.status+" — "+raw.slice(0,180));
+    }
+    var t=providerTextFromBody(raw);
+    if(!t)throw ce("ERROR_AI_INVALID_RESPONSE","Provider پاسخ متنی یا JSON قابل استفاده نداد.");
+    return t;
+  }catch(e){
+    if(e&&e.name==="AbortError")throw ce("ERROR_PROVIDER_TIMEOUT","زمان پاسخ API تمام شد.");
+    throw e;
+  }finally{clearTimeout(timer);}
+}
+async function githubFreeBackendRequest(backend,stage,payload,strictRetry){
+  var c=settings.stages[stage],messages=buildAiMessages(stage,payload,strictRetry),timeout=Math.max(20000,Math.min(Number(c.timeout)||90000,90000));
+  if(backend==="pollinations-native"){
+    return fetchTextWithTimeout("https://text.pollinations.ai/",{
+      messages:messages,model:"openai-fast",temperature:0,seed:42,jsonMode:true
+    },timeout);
+  }
+  if(backend==="pollinations-openai"){
+    return fetchTextWithTimeout("https://text.pollinations.ai/openai",{
+      messages:messages,model:"openai-fast",temperature:0,seed:42,response_format:{type:"json_object"}
+    },timeout);
+  }
+  if(backend==="llm7"){
+    return fetchTextWithTimeout("https://api.llm7.io/v1/chat/completions",{
+      messages:messages,model:"default",temperature:0,response_format:{type:"json_object"}
+    },timeout);
+  }
+  throw ce("ERROR_PROVIDER_UNAVAILABLE","Backend ناشناخته است.");
+}
+async function githubFreeAi(stage,payload){
+  var backends=["pollinations-native","pollinations-openai","llm7"],errors=[];
+  for(var b=0;b<backends.length;b++){
+    for(var retry=0;retry<2;retry++){
+      try{
+        var raw=await githubFreeBackendRequest(backends[b],stage,payload,retry===1);
+        var parsed=parseModelJson(raw);
+        var normalized=normalizeAiResponse(stage,parsed,payload);
+        // Contract-level quick validation decides whether to accept this backend.
+        if(stage==="relevance"||stage==="classification"){
+          if(!normalized||!Array.isArray(normalized.items))throw ce("ERROR_AI_INVALID_RESPONSE","items array معتبر پیدا نشد.");
+          var expected=new Set((payload.clusters||payload.queries||payload.phrases||[]).map(function(x){return String(x.id);}));
+          exactIds(normalized.items,expected,stage+" "+backends[b]);
+        }else if(stage==="intent"){
+          if(!normalized||typeof normalized!=="object"||Array.isArray(normalized))throw ce("ERROR_AI_INVALID_RESPONSE","Intent object معتبر پیدا نشد.");
+        }
+        var sid=stage==="relevance"?"rel":stage==="classification"?"class":"intent";
+        report(sid,"running",(backends[b].indexOf("pollinations")===0?"Pollinations":"LLM7")+" · پاسخ معتبر");
+        return normalized;
+      }catch(e){
+        errors.push(backends[b]+": "+String((e&&e.code)||"ERROR"));
+        if(e&&e.code==="ERROR_PROVIDER_RATE_LIMIT")break;
+      }
+    }
+  }
+  throw ce("ERROR_AI_INVALID_RESPONSE","هیچ‌کدام از APIهای رایگان GitHub contract این مرحله را معتبر برنگرداندند. "+errors.join(" | "));
+}
 async function aiRequest(stage,payload,strictRetry){
   var c=settings.stages[stage];
   if(c.provider==="puter")return puterAiRequest(stage,payload,strictRetry);
@@ -751,28 +916,22 @@ async function aiRequest(stage,payload,strictRetry){
 }
 async function ai(stage,payload){
   var c=settings.stages[stage];
-  if(c.provider==="puter"){
-    if(!c.model)await loadPuterFreeModels(stage,false);
-  }else{
-    var base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
-    if(!base)throw ce("AI_NOT_CONFIGURED","Endpoint در "+stageNames[stage]+" کامل نیست.");
-    if(c.provider!=="llm7"){
-      var k=cleanApiKey(keys[stage]);
-      if(!k)throw ce("AI_NOT_CONFIGURED","API Key در "+stageNames[stage]+" وارد نشده است.");
-    }
-    if(c.provider==="llm7" && !c.model)c.model="default";
-    if(c.provider==="groq" && !c.model){
-      await getModels(stage);
-      c=settings.stages[stage];
-    }
-    if(!String(c.model||"").trim())throw ce("AI_NOT_CONFIGURED","Model در "+stageNames[stage]+" انتخاب نشده است.");
+  if(c.provider==="githubfree")return githubFreeAi(stage,payload);
+  var base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
+  if(!base)throw ce("AI_NOT_CONFIGURED","Endpoint در "+stageNames[stage]+" کامل نیست.");
+  var k=cleanApiKey(keys[stage]);
+  if(!k)throw ce("AI_NOT_CONFIGURED","API Key در "+stageNames[stage]+" وارد نشده است.");
+  if(c.provider==="groq" && !c.model){
+    await getModels(stage);
+    c=settings.stages[stage];
   }
+  if(!String(c.model||"").trim())throw ce("AI_NOT_CONFIGURED","Model در "+stageNames[stage]+" انتخاب نشده است.");
   var first=await aiRequest(stage,payload,false);
-  try{return parseModelJson(first);}catch(e){
+  try{return normalizeAiResponse(stage,parseModelJson(first),payload);}catch(e){
     if(!e||e.code!=="ERROR_AI_INVALID_RESPONSE")throw e;
   }
   var second=await aiRequest(stage,payload,true);
-  try{return parseModelJson(second);}catch(e){
+  try{return normalizeAiResponse(stage,parseModelJson(second),payload);}catch(e){
     throw ce("ERROR_AI_INVALID_RESPONSE","مدل بعد از یک retry کنترل‌شده هم JSON معتبر برنگرداند.");
   }
 }
@@ -853,7 +1012,7 @@ function relevanceClusters(e){
   return {clusters:clusters,tailIds:tailIds,reviewedImpressions:sum,coverage:sum/total*100};
 }
 async function relevance(e){
-  if(["puter","groq","llm7"].indexOf(settings.stages.relevance.provider)>=0){
+  if(["githubfree","groq"].indexOf(settings.stages.relevance.provider)>=0){
     var pack=relevanceClusters(e),out={};
     report("rel","running",pack.clusters.length+" خوشه · "+pack.coverage.toFixed(1)+"٪ Impression");
     var j=await ai("relevance",{
@@ -914,7 +1073,32 @@ async function classify(e,rel){
   var rp=extractPhrases(rq),total=rq.reduce(function(s,q){return s+q.impressions;},0),cc=candidates(rp,settings.candidateLimit,total);
   if(!cc.length)throw ce("REVIEW_REQUIRED_CONCEPT_GROUPING","Phrase candidate کافی برای Classification پیدا نشد.");
 
-  if(["puter","groq","llm7"].indexOf(settings.stages.classification.provider)>=0){
+  if(settings.stages.classification.provider==="githubfree"){
+    var chunks=[],map={},chunkSize=70;
+    for(var ci=0;ci<cc.length;ci+=chunkSize)chunks.push(cc.slice(ci,ci+chunkSize));
+    for(var bi=0;bi<chunks.length;bi++){
+      var batch=chunks[bi];
+      report("class","running",(bi+1)+" / "+chunks.length+" batch · "+batch.length+" phrase");
+      var j=await ai("classification",{
+        task:"phrase_classification",
+        batch_index:bi+1,total_batches:chunks.length,
+        expected_schema:{items:[{id:"existing phrase id",type:"one allowed type",concept_key:"semantic group key",confidence:"0..1"}]},
+        allowed_types:allowedTypes,
+        phrases:batch.map(function(p){
+          return {id:p.id,phrase:p.text,n:p.n,query_count:p.queryCount,included_impressions:p.includedImpressions,concentration:Number(p.concentration.toFixed(3)),sample_queries:rq.filter(function(q){return containsPhrase(q.normalized,p.text);}).slice(0,3).map(function(q){return q.normalized;})};
+        })
+      });
+      if(!j||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Classification batch "+(bi+1)+" معتبر نیست.");
+      var allowed=new Set(batch.map(function(p){return p.id;}));exactIds(j.items,allowed,"classification batch "+(bi+1));
+      j.items.forEach(function(x){
+        if(allowedTypes.indexOf(x.type)<0||typeof x.concept_key!=="string"||!x.concept_key.trim())throw ce("ERROR_AI_INVALID_RESPONSE","Classification schema نامعتبر");
+        map[x.id]=x;
+      });
+    }
+    report("class","done",cc.length+" phrases validated");
+    return {rq:rq,rp:rp,cc:cc,map:map};
+  }
+  if(settings.stages.classification.provider==="groq"){
     report("class","running",cc.length+" phrase · یک درخواست");
     var j=await ai("classification",{
       task:"phrase_classification",
@@ -1204,9 +1388,9 @@ function renderSettings(){
       '<div class="grid g3">'+
         '<label>Provider<select data-prov="'+s+'">'+Object.keys(providers).map(function(id){return '<option value="'+id+'" '+(c.provider===id?"selected":"")+'>'+esc(providers[id].label)+'</option>';}).join("")+'</select></label>'+
         '<label>Endpoint<input data-endpoint="'+s+'" value="'+esc(c.provider==="puter"?"مدیریت‌شده توسط Puter":c.endpoint)+'" dir="ltr" '+(c.provider==="puter"?"disabled":"")+'></label>'+
-        '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+((c.provider==="puter"||c.provider==="llm7")?"نیاز ندارد":c.provider==="groq"?"gsk_...":"sk-or-...")+'" '+((c.provider==="puter"||c.provider==="llm7")?"disabled":"")+'></label>'+
+        '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+((c.provider==="githubfree")?"نیاز ندارد":c.provider==="groq"?"gsk_...":"sk-or-...")+'" '+((c.provider==="githubfree")?"disabled":"")+'></label>'+
       '</div>'+
-      '<div class="hint">'+(c.provider==="llm7"?"پیش‌فرض رایگان: LLM7 anonymous از endpoint معرفی‌شده در فهرست GitHub. API Key لازم نیست؛ مدل default و JSON mode استفاده می‌شود.":c.provider==="groq"?"Groq رایگان است اما API Key می‌خواهد.":c.provider==="puter"?"آزمایشی؛ به‌دلیل ناپایداری upstream توصیه نمی‌شود.":c.provider==="openrouter"?"کلید OpenRouter معمولاً با sk-or- شروع می‌شود.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
+      '<div class="hint">'+(c.provider==="githubfree"?"بدون API Key: ابتدا Pollinations anonymous (پروژه متن‌باز GitHub) امتحان می‌شود و در صورت شکست contract، LLM7 fallback است. خروجی هر بار با exact ID validation کنترل می‌شود.":c.provider==="groq"?"Groq اختیاری است و API Key می‌خواهد.":c.provider==="openrouter"?"OpenRouter اختیاری است و API Key می‌خواهد.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
       '<div class="grid g2">'+
         '<div>'+
           '<div class="model-actions"><button class="btn green" data-load="'+s+'">بارگذاری / به‌روزرسانی مدل‌ها</button><input data-search="'+s+'" placeholder="جست‌وجو بین مدل‌ها" style="margin:0;flex:1;min-width:180px"></div>'+
@@ -1228,8 +1412,8 @@ function bindSettings(){
   document.querySelectorAll("[data-prov]").forEach(function(el){
     el.onchange=function(){
       var s=el.dataset.prov,p=el.value;
-      settings.stages[s].provider=p;settings.stages[s].endpoint=providers[p].endpoint;settings.stages[s].model=p==="llm7"?"default":"";
-      if(p==="puter"||p==="llm7")keys[s]="";
+      settings.stages[s].provider=p;settings.stages[s].endpoint=providers[p].endpoint;settings.stages[s].model=p==="githubfree"?"openai-fast":"";
+      if(p==="githubfree")keys[s]="";
       models[s]=[];modelErrors[s]="";renderSettings();
     };
   });
