@@ -866,6 +866,135 @@ async function githubFreeBackendRequest(backend,stage,payload,strictRetry){
   }
   throw ce("ERROR_PROVIDER_UNAVAILABLE","Backend ناشناخته است.");
 }
+function canonRelevance(v){
+  var s=String(v==null?"":v).trim().toLowerCase();
+  var map={
+    "relevant":"Relevant","مرتبط":"Relevant","مستقیم مرتبط":"Relevant",
+    "adjacent":"Adjacent","نزدیک":"Adjacent","مرتبط فرعی":"Adjacent","نیمه مرتبط":"Adjacent",
+    "irrelevant":"Irrelevant","نامرتبط":"Irrelevant","غیرمرتبط":"Irrelevant"
+  };
+  return map[s]||canonEnum(v,["Relevant","Adjacent","Irrelevant"]);
+}
+function arrayCandidates(parsed){
+  var out=[];
+  if(Array.isArray(parsed))out.push(parsed);
+  if(parsed&&typeof parsed==="object"){
+    ["items","labels","results","classifications","output","data","types","importance","concept_importance"].forEach(function(k){
+      if(Array.isArray(parsed[k]))out.push(parsed[k]);
+    });
+  }
+  collectArrays(parsed,0,out);
+  var seen=new Set(),res=[];
+  out.forEach(function(a){if(Array.isArray(a)&&!seen.has(a)){seen.add(a);res.push(a);}});
+  return res;
+}
+function parsePositionalRelevance(parsed,count){
+  var arrays=arrayCandidates(parsed);
+  for(var i=0;i<arrays.length;i++){
+    var a=arrays[i]; if(a.length!==count)continue;
+    var labels=[],ok=true;
+    for(var j=0;j<a.length;j++){
+      var x=a[j],v=(x&&typeof x==="object")?(x.label||x.relevance||x.status||x.classification):x;
+      var c=canonRelevance(v);
+      if(!c){ok=false;break;}
+      labels.push(c);
+    }
+    if(ok)return labels;
+  }
+  return null;
+}
+function parsePositionalClassification(parsed,count){
+  var arrays=arrayCandidates(parsed);
+  for(var i=0;i<arrays.length;i++){
+    var a=arrays[i]; if(a.length!==count)continue;
+    var items=[],ok=true;
+    for(var j=0;j<a.length;j++){
+      var x=a[j];
+      if(!x||typeof x!=="object"){ok=false;break;}
+      var type=canonEnum(x.type||x.semantic_type||x.semanticType||x.category,allowedTypes);
+      var concept=String(x.concept_key||x.conceptKey||x.concept||x.group_key||x.group||"").trim();
+      if(!type||!concept){ok=false;break;}
+      items.push({type:type,concept_key:concept,confidence:Number.isFinite(Number(x.confidence))?Number(x.confidence):null});
+    }
+    if(ok)return items;
+  }
+  return null;
+}
+function parsePositionalIntent(parsed,qCount,cCount){
+  if(!parsed||typeof parsed!=="object"||Array.isArray(parsed))return null;
+  var root=parsed;
+  ["result","output","data"].some(function(k){
+    if(root[k]&&typeof root[k]==="object"&&!Array.isArray(root[k])){root=root[k];return true;}
+    return false;
+  });
+  var main=String(root.main_intent||root.intent||root.search_intent||root.mainIntent||"").trim();
+  var pi=root.primary_index;
+  if(pi==null)pi=root.primaryIndex;
+  if(pi==null)pi=root.primary;
+  pi=Number(pi);
+  var vi=root.variant_indices;
+  if(vi==null)vi=root.variantIndices;
+  if(vi==null)vi=root.variants;
+  if(vi==null)vi=[];
+  if(!Array.isArray(vi))return null;
+  vi=vi.map(Number);
+  var imp=root.concept_importance;
+  if(imp==null)imp=root.importance;
+  if(imp==null)imp=root.conceptImportance;
+  if(Array.isArray(imp)){
+    imp=imp.map(function(x){
+      if(typeof x==="string")return canonEnum(x,allowedImp);
+      if(x&&typeof x==="object")return canonEnum(x.importance||x.label||x.level,allowedImp);
+      return null;
+    });
+  }
+  if(!main||!Number.isInteger(pi)||pi<0||pi>=qCount||!Array.isArray(imp)||imp.length!==cCount||imp.some(function(x){return !x;}))return null;
+  var uniq=new Set(),vars=[];
+  for(var i=0;i<vi.length;i++){
+    var n=vi[i];
+    if(!Number.isInteger(n)||n<0||n>=qCount||n===pi||uniq.has(n))continue;
+    uniq.add(n);vars.push(n);
+    if(vars.length===3)break;
+  }
+  return {main_intent:main,primary_index:pi,variant_indices:vars,concept_importance:imp};
+}
+function positionalSystem(stage,count){
+  if(stage==="relevance")return "فقط JSON بده. هیچ ID، توضیح، Markdown یا متن اضافه ننویس. برای "+count+" ورودی، دقیقاً "+count+" label و دقیقاً به همان ترتیب ورودی برگردان. schema: {\"labels\":[\"Relevant\",\"Adjacent\",\"Irrelevant\"]}. فقط سه مقدار Relevant, Adjacent, Irrelevant مجازند.";
+  if(stage==="classification")return "فقط JSON بده. هیچ ID، توضیح یا Markdown ننویس. برای "+count+" phrase، دقیقاً "+count+" object و دقیقاً به همان ترتیب ورودی برگردان. schema: {\"items\":[{\"type\":\"Core Entity\",\"concept_key\":\"semantic-group\"}]}. type فقط از allowed_types باشد.";
+  return "فقط JSON بده. هیچ ID، Markdown یا متن اضافه ننویس. queryها و conceptها با index از صفر شماره‌گذاری شده‌اند. فقط index انتخاب کن. schema: {\"main_intent\":\"فارسی\",\"primary_index\":0,\"variant_indices\":[1,2],\"concept_importance\":[\"Core\",\"Important\"]}. concept_importance باید دقیقاً به تعداد conceptها و دقیقاً به همان ترتیب باشد.";
+}
+async function githubFreePositional(stage,userPayload,count,meta){
+  var backends=["pollinations-native","pollinations-openai","llm7"],errors=[];
+  for(var b=0;b<backends.length;b++){
+    try{
+      var messages=[
+        {role:"system",content:positionalSystem(stage,count)},
+        {role:"system",content:"قواعد معنایی مرحله: "+settings.stages[stage].prompt},
+        {role:"user",content:JSON.stringify(userPayload)}
+      ];
+      var timeout=Math.max(20000,Math.min(Number(settings.stages[stage].timeout)||90000,90000));
+      var raw;
+      if(backends[b]==="pollinations-native"){
+        raw=await fetchTextWithTimeout("https://text.pollinations.ai/",{messages:messages,model:"openai-fast",temperature:0,seed:42,jsonMode:true},timeout);
+      }else if(backends[b]==="pollinations-openai"){
+        raw=await fetchTextWithTimeout("https://text.pollinations.ai/openai",{messages:messages,model:"openai-fast",temperature:0,seed:42,response_format:{type:"json_object"}},timeout);
+      }else{
+        raw=await fetchTextWithTimeout("https://api.llm7.io/v1/chat/completions",{messages:messages,model:"default",temperature:0,response_format:{type:"json_object"}},timeout);
+      }
+      var parsed=parseModelJson(raw),out=null;
+      if(stage==="relevance")out=parsePositionalRelevance(parsed,count);
+      else if(stage==="classification")out=parsePositionalClassification(parsed,count);
+      else out=parsePositionalIntent(parsed,meta.qCount,meta.cCount);
+      if(!out)throw ce("ERROR_AI_INVALID_RESPONSE","خروجی ترتیبی معتبر نبود.");
+      var sid=stage==="relevance"?"rel":stage==="classification"?"class":"intent";
+      report(sid,"running",(backends[b].indexOf("pollinations")===0?"Pollinations":"LLM7")+" · positional valid");
+      return out;
+    }catch(e){
+      errors.push(backends[b]+": "+String((e&&e.code)||"ERROR"));
+    }
+  }
+  throw ce("ERROR_AI_INVALID_RESPONSE","Free AI positional contract شکست خورد. "+errors.join(" | "));
+}
 async function githubFreeAi(stage,payload){
   var backends=["pollinations-native","pollinations-openai","llm7"],errors=[];
   for(var b=0;b<backends.length;b++){
@@ -1042,7 +1171,28 @@ function relevanceClusters(e){
   return {clusters:clusters,tailIds:tailIds,reviewedImpressions:sum,coverage:sum/total*100};
 }
 async function relevance(e){
-  if(["githubfree","groq"].indexOf(settings.stages.relevance.provider)>=0){
+  if(settings.stages.relevance.provider==="githubfree"){
+    var pack=relevanceClusters(e),out={},batchSize=15,batches=[];
+    var pageContext=e.queries.slice(0,12).map(function(q){return q.normalized;});
+    for(var ri=0;ri<pack.clusters.length;ri+=batchSize)batches.push(pack.clusters.slice(ri,ri+batchSize));
+    for(var bi=0;bi<batches.length;bi++){
+      var batch=batches[bi];
+      report("rel","running",(bi+1)+" / "+batches.length+" batch · "+pack.coverage.toFixed(1)+"٪ coverage");
+      var labels=await githubFreePositional("relevance",{
+        task:"relevance_by_order",
+        page_context:pageContext,
+        items:batch.map(function(c,idx){return {index:idx,signature:c.signature,examples:c.examples.map(function(x){return x.query;})};})
+      },batch.length,{});
+      batch.forEach(function(c,idx){
+        var label=labels[idx];
+        c.member_ids.forEach(function(id){out[id]={id:id,label:label,confidence:null,cluster_id:c.id};});
+      });
+    }
+    pack.tailIds.forEach(function(id){out[id]={id:id,label:"Unreviewed",confidence:null,reason:"free_mode_tail"};});
+    report("rel","done",pack.clusters.length+" cluster · "+pack.coverage.toFixed(1)+"٪ reviewed");
+    return out;
+  }
+  if(settings.stages.relevance.provider==="groq"){
     var pack=relevanceClusters(e),out={};
     report("rel","running",pack.clusters.length+" خوشه · "+pack.coverage.toFixed(1)+"٪ Impression");
     var j=await ai("relevance",{
@@ -1104,25 +1254,21 @@ async function classify(e,rel){
   if(!cc.length)throw ce("REVIEW_REQUIRED_CONCEPT_GROUPING","Phrase candidate کافی برای Classification پیدا نشد.");
 
   if(settings.stages.classification.provider==="githubfree"){
-    var chunks=[],map={},chunkSize=70;
+    var chunks=[],map={},chunkSize=30;
     for(var ci=0;ci<cc.length;ci+=chunkSize)chunks.push(cc.slice(ci,ci+chunkSize));
     for(var bi=0;bi<chunks.length;bi++){
       var batch=chunks[bi];
       report("class","running",(bi+1)+" / "+chunks.length+" batch · "+batch.length+" phrase");
-      var j=await ai("classification",{
-        task:"phrase_classification",
-        batch_index:bi+1,total_batches:chunks.length,
-        expected_schema:{items:[{id:"existing phrase id",type:"one allowed type",concept_key:"semantic group key",confidence:"0..1"}]},
+      var items=await githubFreePositional("classification",{
+        task:"classification_by_order",
         allowed_types:allowedTypes,
-        phrases:batch.map(function(p){
-          return {id:p.id,phrase:p.text,n:p.n,query_count:p.queryCount,included_impressions:p.includedImpressions,concentration:Number(p.concentration.toFixed(3)),sample_queries:rq.filter(function(q){return containsPhrase(q.normalized,p.text);}).slice(0,3).map(function(q){return q.normalized;})};
+        items:batch.map(function(p,idx){
+          return {index:idx,phrase:p.text,n:p.n,query_count:p.queryCount,included_impressions:p.includedImpressions,sample_queries:rq.filter(function(q){return containsPhrase(q.normalized,p.text);}).slice(0,2).map(function(q){return q.normalized;})};
         })
-      });
-      if(!j||!Array.isArray(j.items))throw ce("ERROR_AI_INVALID_RESPONSE","Classification batch "+(bi+1)+" معتبر نیست.");
-      var allowed=new Set(batch.map(function(p){return p.id;}));exactIds(j.items,allowed,"classification batch "+(bi+1));
-      j.items.forEach(function(x){
-        if(allowedTypes.indexOf(x.type)<0||typeof x.concept_key!=="string"||!x.concept_key.trim())throw ce("ERROR_AI_INVALID_RESPONSE","Classification schema نامعتبر");
-        map[x.id]=x;
+      },batch.length,{});
+      batch.forEach(function(p,idx){
+        var x=items[idx];
+        map[p.id]={id:p.id,type:x.type,concept_key:x.concept_key,confidence:x.confidence};
       });
     }
     report("class","done",cc.length+" phrases validated");
@@ -1217,7 +1363,21 @@ async function intent(e,cd){
   report("intent","running","در حال انتخاب");
   var qc=cd.rq.slice(0,60);
   if(qc.length<3)throw ce("INSUFFICIENT_DATA_FOR_PRIMARY_KEYWORD","حداقل سه Query مرتبط لازم است.");
-  var j=await ai("intent",{task:"intent_primary_variants_importance",expected_schema:{
+  var j;
+  if(settings.stages.intent.provider==="githubfree"){
+    var pos=await githubFreePositional("intent",{
+      task:"intent_by_index",
+      allowed_importance:allowedImp,
+      query_candidates:qc.map(function(q,idx){return {index:idx,query:q.normalized,impressions:q.impressions,token_count:q.tokens.length};}),
+      concepts:pre.map(function(c,idx){return {index:idx,type:c.type,query_count:c.count,impressions:c.impressions,coverage_percent:Number(c.share.toFixed(1)),wordings:c.words.slice(0,4).map(function(w){return w.text;})};})
+    },1,{qCount:qc.length,cCount:pre.length});
+    j={
+      main_intent:pos.main_intent,
+      primary_query_id:qc[pos.primary_index].id,
+      variant_query_ids:pos.variant_indices.map(function(i){return qc[i].id;}),
+      concept_importance:pre.map(function(c,i){return {concept_key:c.key,importance:pos.concept_importance[i]};})
+    };
+  }else j=await ai("intent",{task:"intent_primary_variants_importance",expected_schema:{
     main_intent:"string",
     primary_query_id:"existing query id",
     variant_query_ids:["existing query id; max 3"],
