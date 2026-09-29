@@ -173,7 +173,7 @@ textarea{min-height:145px;direction:ltr;text-align:left;font-family:ui-monospace
           <button id="fullBtn" class="btn primary">تحلیل کامل با AI</button>
           <button id="demoBtn" class="btn ghost">اجرای DEMO</button>
         </div>
-        <div class="help">تحلیل کامل به‌صورت پیش‌فرض از GitHub Free Auto استفاده می‌کند: Pollinations anonymous + fallback به LLM7. API Key لازم ندارد و هر خروجی قبل از استفاده با IDهای واقعی فایل اعتبارسنجی می‌شود.</div>
+        <div class="help">برای تحلیل کامل، Provider پیشنهادی Gemini API رسمی است. API Key فقط در RAM همین تب استفاده می‌شود و ذخیره نمی‌شود؛ Structured Output با JSON Schema برای هر مرحله فعال است.</div>
       </div>
 
       <div class="card">
@@ -228,15 +228,16 @@ var stageNames={
   intent:"مرحله ۳ — Intent، Primary Keyword و Importance"
 };
 var providers={
-  githubfree:{label:"GitHub Free Auto — بدون API Key",endpoint:"https://text.pollinations.ai"},
+  gemini:{label:"Google Gemini API — پیشنهادی",endpoint:"https://generativelanguage.googleapis.com/v1beta"},
+  githubfree:{label:"GitHub Free Auto — آزمایشی",endpoint:"https://text.pollinations.ai"},
   groq:{label:"Groq — اختیاری",endpoint:"https://api.groq.com/openai/v1"},
   openrouter:{label:"OpenRouter — اختیاری",endpoint:"https://openrouter.ai/api/v1"},
   custom:{label:"OpenAI-compatible Endpoint",endpoint:""}
 };
 var defaults={
-  relevance:"هویت غالب URL را از context یا examples بفهم. فقط IDهایی را که در ورودی داده شده‌اند طبقه‌بندی کن؛ ID می‌تواند Query یا Cluster باشد. برای هر ID دقیقاً یکی از Relevant، Adjacent یا Irrelevant برگردان. هیچ query، cluster یا metric جدید نساز. خروجی فقط JSON با شکل {\"items\":[{\"id\":\"input_id\",\"label\":\"Relevant\",\"confidence\":0.9}]} باشد.",
-  classification:"فقط phraseهای داده‌شده را طبقه‌بندی و در conceptهای معنایی گروه‌بندی کن. type باید یکی از allowed_types باشد. هیچ phrase یا metric جدید نساز. همه IDها دقیقاً یک‌بار برگردند. خروجی فقط JSON با شکل {\"items\":[{\"id\":\"p1\",\"type\":\"Core Entity\",\"concept_key\":\"...\",\"confidence\":0.9}]} باشد.",
-  intent:"فقط از query_id و concept_keyهای ورودی انتخاب کن. Opportunity یا Position را به‌عنوان اهمیت تقاضا استفاده نکن. main_intent را کوتاه، دقیق و به زبان فارسی بنویس. خروجی فقط JSON و دقیقاً با این schema باشد: {\"main_intent\":\"...\",\"primary_query_id\":\"q1\",\"variant_query_ids\":[\"q2\"],\"concept_importance\":[{\"concept_key\":\"exact input concept key\",\"importance\":\"Core\"}]}. concept_importance حتماً ARRAY باشد، نه object/map. برای هر concept ورودی دقیقاً یک آیتم برگردان و هیچ ID یا metric جدید نساز."
+  relevance:"هویت غالب این URL را از context و example queryها تشخیص بده. هر ورودی را فقط از نظر ارتباط معنایی با هویت اصلی صفحه به Relevant، Adjacent یا Irrelevant طبقه‌بندی کن. Metric جدید نساز و Position/CTR را معیار ارتباط قرار نده.",
+  classification:"Phraseها را فقط از نظر معنایی طبقه‌بندی کن و عبارت‌های هم‌معنی را زیر concept_key کوتاه و ثابت گروه‌بندی کن. type فقط از allowed semantic types باشد. Metric جدید نساز.",
+  intent:"Main Search Intent را کوتاه و دقیق به فارسی بنویس. Primary Keyword باید نماینده demand identity باشد؛ Mandatory Variantها wordingهای مهم همان هویت باشند. Position و CTR معیار Importance نیستند. Concept Importance فقط Core، Important، Secondary یا Conditional است."
 };
 var allowedTypes=["Core Entity","Semantic Concept","Temporal Qualifier","Modifier","Brand","Product / Model Entity","Location","Content Format","Action / Sub-intent","Question Pattern"];
 var allowedImp=["Core","Important","Secondary","Conditional"];
@@ -255,7 +256,7 @@ var pstate={};
 function baseSettings(){
   var s={candidateLimit:140,stages:{}};
   stageKeys.forEach(function(k){
-    s.stages[k]={provider:"githubfree",endpoint:providers.githubfree.endpoint,model:"openai-fast",prompt:defaults[k],timeout:90000,temp:0};
+    s.stages[k]={provider:"gemini",endpoint:providers.gemini.endpoint,model:"",prompt:defaults[k],timeout:90000,temp:0};
   });
   return s;
 }
@@ -304,6 +305,17 @@ function loadSettings(){
         }
       });
       b.githubFreeMigrationVersion="githubfree-v3";
+    }
+    if(b.geminiMigrationVersion!=="gemini-v1"){
+      stageKeys.forEach(function(k){
+        b.stages[k].provider="gemini";
+        b.stages[k].endpoint=providers.gemini.endpoint;
+        b.stages[k].model="";
+        b.stages[k].timeout=90000;
+        var p=String(b.stages[k].prompt||"");
+        if(!p || /query_id|concept_key.*ARRAY|خروجی فقط JSON|همه ID|input_id/.test(p))b.stages[k].prompt=defaults[k];
+      });
+      b.geminiMigrationVersion="gemini-v1";
       try{localStorage.setItem("ski-v2-settings",JSON.stringify(b));}catch(ignore){}
     }
   }catch(e){}
@@ -508,8 +520,40 @@ async function loadPuterFreeModels(stage,render){
   if(render!==false)renderSettings();
   return c.model;
 }
+async function loadGeminiModels(stage,render){
+  var c=settings.stages[stage],k=cleanApiKey(keys[stage]);
+  if(!k)throw ce("AI_NOT_CONFIGURED","Gemini API Key وارد نشده است.");
+  var base=(c.endpoint||providers.gemini.endpoint).replace(/\/$/,"");
+  var r;
+  try{r=await fetch(base+"/models",{headers:{"x-goog-api-key":k}});}
+  catch(e){throw ce("ERROR_MODEL_LIST_UNAVAILABLE",String(e&&e.message||e));}
+  if(!r.ok)throw ce("ERROR_MODEL_LIST_UNAVAILABLE",r.status+" — "+(await r.text()).slice(0,180));
+  var j=await r.json(),list=Array.isArray(j.models)?j.models:[];
+  list=list.filter(function(m){
+    var methods=m.supportedGenerationMethods||[];
+    var id=String(m.name||"").replace(/^models\//,"");
+    return methods.indexOf("generateContent")>=0 && /^gemini-/.test(id) &&
+      !/live|image|tts|embedding|robotics|computer|deep-research|transcribe|omni/i.test(id);
+  }).map(function(m){
+    return {id:String(m.name||"").replace(/^models\//,""),name:String(m.displayName||m.name||"")};
+  });
+  if(!list.length)throw ce("ERROR_MODEL_LIST_UNAVAILABLE","هیچ مدل متنی Gemini با generateContent برای این Key برنگشت.");
+  models[stage]=list;
+  var preferred=["gemini-3.8-flash","gemini-3.7-flash","gemini-3.6-flash","gemini-3.5-flash","gemini-3.5-flash-lite","gemini-3.1-flash-lite","gemini-2.5-flash-lite"];
+  if(!c.model||!list.some(function(m){return m.id===c.model;})){
+    c.model="";
+    for(var pi=0;pi<preferred.length;pi++){
+      if(list.some(function(m){return m.id===preferred[pi];})){c.model=preferred[pi];break;}
+    }
+    if(!c.model)c.model=list[0].id;
+  }
+  modelErrors[stage]="";
+  if(render!==false)renderSettings();
+  return c.model;
+}
 async function getModels(stage){
   var c=settings.stages[stage];
+  if(c.provider==="gemini")return loadGeminiModels(stage,true);
   if(c.provider==="puter")return loadPuterFreeModels(stage,true);
   var base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
   if(!base)throw ce("ERROR_MODEL_LIST_UNAVAILABLE","Endpoint خالی است.");
@@ -958,6 +1002,91 @@ function parsePositionalIntent(parsed,qCount,cCount){
   }
   return {main_intent:main,primary_index:pi,variant_indices:vars,concept_importance:imp};
 }
+function geminiSchema(stage,meta){
+  if(stage==="relevance")return {
+    type:"object",additionalProperties:false,
+    properties:{labels:{type:"array",minItems:meta.count,maxItems:meta.count,items:{type:"string",enum:["Relevant","Adjacent","Irrelevant"]}}},
+    required:["labels"]
+  };
+  if(stage==="classification")return {
+    type:"object",additionalProperties:false,
+    properties:{items:{type:"array",minItems:meta.count,maxItems:meta.count,items:{
+      type:"object",additionalProperties:false,
+      properties:{type:{type:"string",enum:allowedTypes},concept_key:{type:"string"}},
+      required:["type","concept_key"]
+    }}},
+    required:["items"]
+  };
+  return {
+    type:"object",additionalProperties:false,
+    properties:{
+      main_intent:{type:"string"},
+      primary_index:{type:"integer",minimum:0,maximum:Math.max(0,meta.qCount-1)},
+      variant_indices:{type:"array",maxItems:3,items:{type:"integer",minimum:0,maximum:Math.max(0,meta.qCount-1)}},
+      concept_importance:{type:"array",minItems:meta.cCount,maxItems:meta.cCount,items:{type:"string",enum:allowedImp}}
+    },
+    required:["main_intent","primary_index","variant_indices","concept_importance"]
+  };
+}
+function geminiStageInstruction(stage,meta){
+  if(stage==="relevance")return "برای هر item دقیقاً یک label به همان ترتیب ورودی بده. ID نساز. labels باید دقیقاً "+meta.count+" عضو داشته باشد.";
+  if(stage==="classification")return "برای هر phrase دقیقاً یک object به همان ترتیب ورودی بده. ID نساز. concept_key باید کوتاه، canonical و برای عبارت‌های هم‌معنی یکسان باشد.";
+  return "Queryها و conceptها با index صفرمبنا داده شده‌اند. فقط index انتخاب کن؛ ID نساز. concept_importance باید دقیقاً به تعداد conceptها و همان ترتیب باشد.";
+}
+async function geminiAi(stage,userPayload,meta){
+  var c=settings.stages[stage],k=cleanApiKey(keys[stage]);
+  if(!k)throw ce("AI_NOT_CONFIGURED","Gemini API Key در "+stageNames[stage]+" وارد نشده است.");
+  if(!c.model)await loadGeminiModels(stage,false);
+  var model=String(c.model||"").replace(/^models\//,"");
+  if(!model)throw ce("AI_NOT_CONFIGURED","Gemini Model انتخاب نشده است.");
+  var base=(c.endpoint||providers.gemini.endpoint).replace(/\/$/,"");
+  var timeout=Math.max(20000,Math.min(Number(c.timeout)||90000,120000));
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},timeout);
+  try{
+    var body={
+      systemInstruction:{parts:[{text:geminiStageInstruction(stage,meta)+"\nقواعد معنایی:\n"+c.prompt}]},
+      contents:[{role:"user",parts:[{text:JSON.stringify(userPayload)}]}],
+      generationConfig:{
+        temperature:Number(c.temp)||0,
+        maxOutputTokens:16384,
+        responseFormat:{text:{mimeType:"application/json",schema:geminiSchema(stage,meta)}}
+      }
+    };
+    var r=await fetch(base+"/models/"+encodeURIComponent(model)+":generateContent",{
+      method:"POST",headers:{"content-type":"application/json","x-goog-api-key":k},signal:ctrl.signal,body:JSON.stringify(body)
+    });
+    var raw=await r.text();
+    if(!r.ok){
+      if(r.status===429)throw ce("ERROR_PROVIDER_RATE_LIMIT","Gemini 429 — "+raw.slice(0,220));
+      throw ce("ERROR_PROVIDER_UNAVAILABLE","Gemini "+r.status+" — "+raw.slice(0,220));
+    }
+    var j=JSON.parse(raw),parts=j&&j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts;
+    var txt=Array.isArray(parts)?parts.map(function(p){return p&&p.text||"";}).join("").trim():"";
+    if(!txt)throw ce("ERROR_AI_INVALID_RESPONSE","Gemini پاسخ متنی Structured Output برنگرداند.");
+    var out;
+    try{out=JSON.parse(txt);}catch(e){throw ce("ERROR_AI_INVALID_RESPONSE","Gemini JSON قابل parse برنگرداند.");}
+    if(stage==="relevance"){
+      if(!out||!Array.isArray(out.labels)||out.labels.length!==meta.count)throw ce("ERROR_AI_INVALID_RESPONSE","Gemini Relevance count mismatch.");
+      if(out.labels.some(function(x){return ["Relevant","Adjacent","Irrelevant"].indexOf(x)<0;}))throw ce("ERROR_AI_INVALID_RESPONSE","Gemini Relevance label نامعتبر.");
+    }else if(stage==="classification"){
+      if(!out||!Array.isArray(out.items)||out.items.length!==meta.count)throw ce("ERROR_AI_INVALID_RESPONSE","Gemini Classification count mismatch.");
+      out.items.forEach(function(x){
+        if(!x||allowedTypes.indexOf(x.type)<0||typeof x.concept_key!=="string"||!x.concept_key.trim())throw ce("ERROR_AI_INVALID_RESPONSE","Gemini Classification item نامعتبر.");
+      });
+    }else{
+      if(!out||typeof out.main_intent!=="string"||!out.main_intent.trim())throw ce("ERROR_AI_INVALID_RESPONSE","Gemini Intent نامعتبر.");
+      if(!Number.isInteger(out.primary_index)||out.primary_index<0||out.primary_index>=meta.qCount)throw ce("ERROR_AI_INVALID_RESPONSE","Gemini Primary index نامعتبر.");
+      if(!Array.isArray(out.variant_indices)||out.variant_indices.length>3)throw ce("ERROR_AI_INVALID_RESPONSE","Gemini Variants نامعتبر.");
+      if(out.variant_indices.some(function(n){return !Number.isInteger(n)||n<0||n>=meta.qCount;}))throw ce("ERROR_AI_INVALID_RESPONSE","Gemini Variant index نامعتبر.");
+      if(!Array.isArray(out.concept_importance)||out.concept_importance.length!==meta.cCount||out.concept_importance.some(function(x){return allowedImp.indexOf(x)<0;}))throw ce("ERROR_AI_INVALID_RESPONSE","Gemini Concept Importance نامعتبر.");
+    }
+    return out;
+  }catch(e){
+    if(e&&e.name==="AbortError")throw ce("ERROR_PROVIDER_TIMEOUT","Gemini بعد از "+Math.round(timeout/1000)+" ثانیه پاسخ نداد.");
+    if(e&&e.code)throw e;
+    throw ce("ERROR_PROVIDER_UNAVAILABLE",String(e&&e.message||e));
+  }finally{clearTimeout(timer);}
+}
 function cleanModelText(raw){
   return String(raw==null?"":raw)
     .replace(/\`\`\`(?:json|text|txt)?/gi,"")
@@ -1281,6 +1410,26 @@ function relevanceClusters(e){
   return {clusters:clusters,tailIds:tailIds,reviewedImpressions:sum,coverage:sum/total*100};
 }
 async function relevance(e){
+  if(settings.stages.relevance.provider==="gemini"){
+    var pack=relevanceClusters(e),out={},batchSize=30,batches=[];
+    var pageContext=e.queries.slice(0,20).map(function(q){return {query:q.normalized,impressions:q.impressions};});
+    for(var ri=0;ri<pack.clusters.length;ri+=batchSize)batches.push(pack.clusters.slice(ri,ri+batchSize));
+    for(var bi=0;bi<batches.length;bi++){
+      var batch=batches[bi];
+      report("rel","running","Gemini · "+(bi+1)+" / "+batches.length+" batch");
+      var g=await geminiAi("relevance",{
+        page_context:pageContext,
+        items:batch.map(function(c,idx){return {index:idx,signature:c.signature,examples:c.examples.map(function(x){return x.query;})};})
+      },{count:batch.length});
+      batch.forEach(function(c,idx){
+        var label=g.labels[idx];
+        c.member_ids.forEach(function(id){out[id]={id:id,label:label,confidence:null,cluster_id:c.id};});
+      });
+    }
+    pack.tailIds.forEach(function(id){out[id]={id:id,label:"Unreviewed",confidence:null,reason:"cluster_tail"};});
+    report("rel","done","Gemini · "+pack.clusters.length+" cluster · "+pack.coverage.toFixed(1)+"٪ reviewed");
+    return out;
+  }
   if(settings.stages.relevance.provider==="githubfree"){
     var pack=relevanceClusters(e),out={},batchSize=10,batches=[];
     var pageContext=e.queries.slice(0,12).map(function(q){return q.normalized;});
@@ -1362,6 +1511,26 @@ async function classify(e,rel){
   var rp=extractPhrases(rq),total=rq.reduce(function(s,q){return s+q.impressions;},0),cc=candidates(rp,settings.candidateLimit,total);
   if(!cc.length)throw ce("REVIEW_REQUIRED_CONCEPT_GROUPING","Phrase candidate کافی برای Classification پیدا نشد.");
 
+  if(settings.stages.classification.provider==="gemini"){
+    var chunks=[],map={},chunkSize=40;
+    for(var gi=0;gi<cc.length;gi+=chunkSize)chunks.push(cc.slice(gi,gi+chunkSize));
+    for(var gb=0;gb<chunks.length;gb++){
+      var batch=chunks[gb];
+      report("class","running","Gemini · "+(gb+1)+" / "+chunks.length+" batch");
+      var g=await geminiAi("classification",{
+        allowed_types:allowedTypes,
+        phrases:batch.map(function(p,idx){
+          return {index:idx,phrase:p.text,n:p.n,query_count:p.queryCount,included_impressions:p.includedImpressions,sample_queries:rq.filter(function(q){return containsPhrase(q.normalized,p.text);}).slice(0,3).map(function(q){return q.normalized;})};
+        })
+      },{count:batch.length});
+      batch.forEach(function(p,idx){
+        var x=g.items[idx];
+        map[p.id]={id:p.id,type:x.type,concept_key:x.concept_key,confidence:null};
+      });
+    }
+    report("class","done","Gemini · "+cc.length+" phrases validated");
+    return {rq:rq,rp:rp,cc:cc,map:map};
+  }
   if(settings.stages.classification.provider==="githubfree"){
     var chunks=[],map={},chunkSize=20;
     for(var ci=0;ci<cc.length;ci+=chunkSize)chunks.push(cc.slice(ci,ci+chunkSize));
@@ -1471,7 +1640,18 @@ async function intent(e,cd){
   var qc=cd.rq.slice(0,60);
   if(qc.length<3)throw ce("INSUFFICIENT_DATA_FOR_PRIMARY_KEYWORD","حداقل سه Query مرتبط لازم است.");
   var j;
-  if(settings.stages.intent.provider==="githubfree"){
+  if(settings.stages.intent.provider==="gemini"){
+    var g=await geminiAi("intent",{
+      query_candidates:qc.map(function(q,idx){return {index:idx,query:q.normalized,impressions:q.impressions,token_count:q.tokens.length};}),
+      concepts:pre.map(function(c,idx){return {index:idx,type:c.type,query_count:c.count,impressions:c.impressions,coverage_percent:Number(c.share.toFixed(1)),wordings:c.words.slice(0,5).map(function(w){return w.text;})};})
+    },{qCount:qc.length,cCount:pre.length});
+    j={
+      main_intent:g.main_intent,
+      primary_query_id:qc[g.primary_index].id,
+      variant_query_ids:Array.from(new Set(g.variant_indices)).filter(function(i){return i!==g.primary_index;}).slice(0,3).map(function(i){return qc[i].id;}),
+      concept_importance:pre.map(function(c,i){return {concept_key:c.key,importance:g.concept_importance[i]};})
+    };
+  }else if(settings.stages.intent.provider==="githubfree"){
     var pos=await freeTextAi("intent",{
       query_candidates:qc.map(function(q,idx){return {index:idx,query:q.normalized,impressions:q.impressions,token_count:q.tokens.length};}),
       concepts:pre.map(function(c,idx){return {index:idx,type:c.type,query_count:c.count,impressions:c.impressions,coverage_percent:Number(c.share.toFixed(1)),wordings:c.words.slice(0,4).map(function(w){return w.text;})};})
@@ -1683,9 +1863,9 @@ function renderSettings(){
       '<div class="grid g3">'+
         '<label>Provider<select data-prov="'+s+'">'+Object.keys(providers).map(function(id){return '<option value="'+id+'" '+(c.provider===id?"selected":"")+'>'+esc(providers[id].label)+'</option>';}).join("")+'</select></label>'+
         '<label>Endpoint<input data-endpoint="'+s+'" value="'+esc(c.provider==="puter"?"مدیریت‌شده توسط Puter":c.endpoint)+'" dir="ltr" '+(c.provider==="puter"?"disabled":"")+'></label>'+
-        '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+((c.provider==="githubfree")?"نیاز ندارد":c.provider==="groq"?"gsk_...":"sk-or-...")+'" '+((c.provider==="githubfree")?"disabled":"")+'></label>'+
+        '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+(c.provider==="githubfree"?"نیاز ندارد":c.provider==="gemini"?"Google AI Studio API Key":c.provider==="groq"?"gsk_...":"sk-or-...")+'" '+((c.provider==="githubfree")?"disabled":"")+'></label>'+
       '</div>'+
-      '<div class="hint">'+(c.provider==="githubfree"?"بدون API Key: ابتدا Pollinations anonymous (پروژه متن‌باز GitHub) امتحان می‌شود و در صورت شکست contract، LLM7 fallback است. خروجی هر بار با exact ID validation کنترل می‌شود.":c.provider==="groq"?"Groq اختیاری است و API Key می‌خواهد.":c.provider==="openrouter"?"OpenRouter اختیاری است و API Key می‌خواهد.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
+      '<div class="hint">'+(c.provider==="gemini"?"پیشنهادی: Gemini API رسمی با Structured Output و JSON Schema. کلید فقط در حافظه همین تب است و ذخیره نمی‌شود. مدل‌ها مستقیماً از Google API خوانده می‌شوند.":c.provider==="githubfree"?"آزمایشی؛ بدون Key ولی برای تحلیل اصلی توصیه نمی‌شود.":c.provider==="groq"?"Groq اختیاری است و API Key می‌خواهد.":c.provider==="openrouter"?"OpenRouter اختیاری است و API Key می‌خواهد.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
       '<div class="grid g2">'+
         '<div>'+
           '<div class="model-actions"><button class="btn green" data-load="'+s+'">بارگذاری / به‌روزرسانی مدل‌ها</button><input data-search="'+s+'" placeholder="جست‌وجو بین مدل‌ها" style="margin:0;flex:1;min-width:180px"></div>'+
