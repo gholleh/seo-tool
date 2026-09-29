@@ -256,7 +256,7 @@ var pstate={};
 function baseSettings(){
   var s={candidateLimit:140,stages:{}};
   stageKeys.forEach(function(k){
-    s.stages[k]={provider:"gemini",endpoint:providers.gemini.endpoint,model:"",prompt:defaults[k],timeout:90000,temp:0};
+    s.stages[k]={provider:"gemini",endpoint:providers.gemini.endpoint,model:"gemini-3.8-flash",prompt:defaults[k],timeout:90000,temp:0};
   });
   return s;
 }
@@ -271,7 +271,7 @@ function loadSettings(){
       stageKeys.forEach(function(k){
         b.stages[k].provider="puter";
         b.stages[k].endpoint="";
-        b.stages[k].model="";
+        b.stages[k].model="gemini-3.8-flash";
         b.stages[k].timeout=90000;
       });
       b.freeProviderVersion="puter-free-v1";
@@ -523,35 +523,16 @@ async function loadPuterFreeModels(stage,render){
 async function loadGeminiModels(stage,render){
   var c=settings.stages[stage],k=cleanApiKey(keys[stage]);
   if(!k)throw ce("AI_NOT_CONFIGURED","Gemini API Key وارد نشده است.");
-  var base=(c.endpoint||providers.gemini.endpoint).replace(/\/$/,"");
-  var r;
-  try{r=await fetch(base+"/models",{headers:{"x-goog-api-key":k}});}
-  catch(e){throw ce("ERROR_MODEL_LIST_UNAVAILABLE",String(e&&e.message||e));}
-  if(!r.ok){
-    var body=(await r.text()).slice(0,220);
-    if(r.status===401||r.status===403)throw ce("ERROR_GEMINI_AUTH","Gemini Key رد شد: "+body);
-    if(r.status===429)throw ce("ERROR_PROVIDER_RATE_LIMIT","Gemini quota/rate limit: "+body);
-    throw ce("ERROR_MODEL_LIST_UNAVAILABLE",r.status+" — "+body);
-  }
-  var j=await r.json(),list=Array.isArray(j.models)?j.models:[];
-  list=list.filter(function(m){
-    var methods=m.supportedGenerationMethods||[];
-    var id=String(m.name||"").replace(/^models\//,"");
-    return methods.indexOf("generateContent")>=0 && /^gemini-/.test(id) &&
-      !/live|image|tts|embedding|robotics|computer|deep-research|transcribe|omni/i.test(id);
-  }).map(function(m){
-    return {id:String(m.name||"").replace(/^models\//,""),name:String(m.displayName||m.name||"")};
-  });
-  if(!list.length)throw ce("ERROR_MODEL_LIST_UNAVAILABLE","هیچ مدل متنی Gemini با generateContent برای این Key برنگشت.");
+  var list=[
+    {id:"gemini-3.8-flash",name:"Gemini 3.8 Flash — پیشنهادی"},
+    {id:"gemini-3.7-flash",name:"Gemini 3.7 Flash"},
+    {id:"gemini-3.6-flash",name:"Gemini 3.6 Flash"},
+    {id:"gemini-3.5-flash",name:"Gemini 3.5 Flash"},
+    {id:"gemini-3.5-flash-lite",name:"Gemini 3.5 Flash-Lite"},
+    {id:"gemini-3.1-flash-lite",name:"Gemini 3.1 Flash-Lite"}
+  ];
   models[stage]=list;
-  var preferred=["gemini-3.8-flash","gemini-3.7-flash","gemini-3.6-flash","gemini-3.5-flash","gemini-3.5-flash-lite","gemini-3.1-flash-lite","gemini-2.5-flash-lite"];
-  if(!c.model||!list.some(function(m){return m.id===c.model;})){
-    c.model="";
-    for(var pi=0;pi<preferred.length;pi++){
-      if(list.some(function(m){return m.id===preferred[pi];})){c.model=preferred[pi];break;}
-    }
-    if(!c.model)c.model=list[0].id;
-  }
+  if(!c.model||!list.some(function(m){return m.id===c.model;}))c.model="gemini-3.8-flash";
   modelErrors[stage]="";
   if(render!==false)renderSettings();
   return c.model;
@@ -1090,6 +1071,7 @@ async function geminiAi(stage,userPayload,meta){
   }catch(e){
     if(e&&e.name==="AbortError")throw ce("ERROR_PROVIDER_TIMEOUT","Gemini بعد از "+Math.round(timeout/1000)+" ثانیه پاسخ نداد.");
     if(e&&e.code)throw e;
+    if(e instanceof TypeError && /fetch/i.test(String(e&&e.message||e)))throw ce("ERROR_GEMINI_NETWORK","مرورگر نتوانست به endpoint رسمی Gemini وصل شود. این خطا مربوط به شبکه/CORS است، نه JSON یا فایل GSC.");
     throw ce("ERROR_PROVIDER_UNAVAILABLE",String(e&&e.message||e));
   }finally{clearTimeout(timer);}
 }
@@ -1871,10 +1853,10 @@ function renderSettings(){
         '<label>Endpoint<input data-endpoint="'+s+'" value="'+esc(c.provider==="puter"?"مدیریت‌شده توسط Puter":c.endpoint)+'" dir="ltr" '+(c.provider==="puter"?"disabled":"")+'></label>'+
         '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+(c.provider==="githubfree"?"نیاز ندارد":c.provider==="gemini"?"Google AI Studio API Key":c.provider==="groq"?"gsk_...":"sk-or-...")+'" '+((c.provider==="githubfree")?"disabled":"")+'></label>'+
       '</div>'+
-      '<div class="hint">'+(c.provider==="gemini"?"پیشنهادی: Gemini API رسمی با Structured Output و JSON Schema. کلید فقط در حافظه همین تب است و ذخیره نمی‌شود. مدل‌ها مستقیماً از Google API خوانده می‌شوند.":c.provider==="githubfree"?"آزمایشی؛ بدون Key ولی برای تحلیل اصلی توصیه نمی‌شود.":c.provider==="groq"?"Groq اختیاری است و API Key می‌خواهد.":c.provider==="openrouter"?"OpenRouter اختیاری است و API Key می‌خواهد.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
+      '<div class="hint">'+(c.provider==="gemini"?"پیشنهادی: Gemini API رسمی با Structured Output و JSON Schema. کلید فقط در حافظه همین تب است و ذخیره نمی‌شود. مدل‌های پایدار Gemini داخل ابزار تعریف شده‌اند تا ListModels مرورگر مانع اجرا نشود؛ درخواست تحلیل مستقیماً به generateContent رسمی Google می‌رود.":c.provider==="githubfree"?"آزمایشی؛ بدون Key ولی برای تحلیل اصلی توصیه نمی‌شود.":c.provider==="groq"?"Groq اختیاری است و API Key می‌خواهد.":c.provider==="openrouter"?"OpenRouter اختیاری است و API Key می‌خواهد.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
       '<div class="grid g2">'+
         '<div>'+
-          '<div class="model-actions"><button class="btn green" data-load="'+s+'">بارگذاری / به‌روزرسانی مدل‌ها</button><input data-search="'+s+'" placeholder="جست‌وجو بین مدل‌ها" style="margin:0;flex:1;min-width:180px"></div>'+
+          '<div class="model-actions"><button class="btn green" data-load="'+s+'">'+(c.provider==="gemini"?"نمایش مدل‌های پیشنهادی Gemini":"بارگذاری / به‌روزرسانی مدل‌ها")+'</button><input data-search="'+s+'" placeholder="جست‌وجو بین مدل‌ها" style="margin:0;flex:1;min-width:180px"></div>'+
           '<div class="modelbox">'+(ms.length?ms.slice(0,180).map(function(m){return '<div class="model" data-pick="'+s+'" data-mid="'+esc(m.id)+'"><b>'+esc(m.name)+'</b><small>'+esc(m.id)+'</small></div>';}).join(""):'<div class="model-empty">هنوز هیچ مدلی بارگذاری نشده است.</div>')+'</div>'+
         '</div>'+
         '<div>'+
@@ -1893,7 +1875,7 @@ function bindSettings(){
   document.querySelectorAll("[data-prov]").forEach(function(el){
     el.onchange=function(){
       var s=el.dataset.prov,p=el.value;
-      settings.stages[s].provider=p;settings.stages[s].endpoint=providers[p].endpoint;settings.stages[s].model=p==="githubfree"?"openai-fast":"";
+      settings.stages[s].provider=p;settings.stages[s].endpoint=providers[p].endpoint;settings.stages[s].model=p==="githubfree"?"openai-fast":p==="gemini"?"gemini-3.8-flash":"";
       if(p==="githubfree")keys[s]="";
       models[s]=[];modelErrors[s]="";renderSettings();
     };
