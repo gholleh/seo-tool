@@ -295,7 +295,7 @@ function loadSettings(){
       b.providerMigrationVersion="llm7-v1";
       try{localStorage.setItem("ski-v2-settings",JSON.stringify(b));}catch(ignore){}
     }
-    if(b.githubFreeMigrationVersion!=="githubfree-v3"){
+    if(x.githubFreeMigrationVersion!=="githubfree-v3"){
       stageKeys.forEach(function(k){
         if(["llm7","puter","groq"].indexOf(b.stages[k].provider)>=0 || !b.stages[k].provider){
           b.stages[k].provider="githubfree";
@@ -306,7 +306,7 @@ function loadSettings(){
       });
       b.githubFreeMigrationVersion="githubfree-v3";
     }
-    if(b.geminiMigrationVersion!=="gemini-v1"){
+    if(x.geminiMigrationVersion!=="gemini-v1"){
       stageKeys.forEach(function(k){
         b.stages[k].provider="gemini";
         b.stages[k].endpoint=providers.gemini.endpoint;
