@@ -479,8 +479,8 @@ function cleanApiKey(raw){
     .replace(/\u00A0/g," ")
     .trim();
   if(!s)return "";
-  if(/[\r\n\t ]/.test(s))throw ce("ERROR_API_KEY_INVALID_CHARS","API Key شامل فاصله یا خط‌شکست داخل کلید است. کلید را دوباره مستقیماً از OpenRouter کپی کن.");
-  if(!/^[\x21-\x7E]+$/.test(s))throw ce("ERROR_API_KEY_INVALID_CHARS","API Key شامل کاراکتر غیر ASCII است؛ معمولاً خط‌تیره یا کاراکتر مخفی هنگام Copy/Paste تغییر کرده. کلید را دوباره از OpenRouter کپی کن.");
+  if(/[\r\n\t ]/.test(s))throw ce("ERROR_API_KEY_INVALID_CHARS","API Key شامل فاصله یا خط‌شکست داخل کلید است. کلید را دوباره مستقیماً از Provider کپی کن.");
+  if(!/^[\x21-\x7E]+$/.test(s))throw ce("ERROR_API_KEY_INVALID_CHARS","API Key شامل کاراکتر غیر ASCII است؛ معمولاً یک کاراکتر مخفی هنگام Copy/Paste وارد شده. کلید را دوباره از Provider کپی کن.");
   return s;
 }
 function safeHeaders(stage,withJson){
@@ -527,7 +527,12 @@ async function loadGeminiModels(stage,render){
   var r;
   try{r=await fetch(base+"/models",{headers:{"x-goog-api-key":k}});}
   catch(e){throw ce("ERROR_MODEL_LIST_UNAVAILABLE",String(e&&e.message||e));}
-  if(!r.ok)throw ce("ERROR_MODEL_LIST_UNAVAILABLE",r.status+" — "+(await r.text()).slice(0,180));
+  if(!r.ok){
+    var body=(await r.text()).slice(0,220);
+    if(r.status===401||r.status===403)throw ce("ERROR_GEMINI_AUTH","Gemini Key رد شد: "+body);
+    if(r.status===429)throw ce("ERROR_PROVIDER_RATE_LIMIT","Gemini quota/rate limit: "+body);
+    throw ce("ERROR_MODEL_LIST_UNAVAILABLE",r.status+" — "+body);
+  }
   var j=await r.json(),list=Array.isArray(j.models)?j.models:[];
   list=list.filter(function(m){
     var methods=m.supportedGenerationMethods||[];
@@ -1057,6 +1062,7 @@ async function geminiAi(stage,userPayload,meta){
     });
     var raw=await r.text();
     if(!r.ok){
+      if(r.status===401||r.status===403)throw ce("ERROR_GEMINI_AUTH","Gemini Key رد شد: "+raw.slice(0,220));
       if(r.status===429)throw ce("ERROR_PROVIDER_RATE_LIMIT","Gemini 429 — "+raw.slice(0,220));
       throw ce("ERROR_PROVIDER_UNAVAILABLE","Gemini "+r.status+" — "+raw.slice(0,220));
     }
