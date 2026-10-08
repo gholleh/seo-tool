@@ -41,6 +41,19 @@ button{cursor:pointer}
 .card-title h2,.card-title h3{margin:0;font-size:16px;letter-spacing:-.2px}
 .card-title p{margin:4px 0 0;color:var(--muted);font-size:11.5px}
 .step-badge{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;padding:5px 9px;border-radius:999px;font-size:10px;white-space:nowrap}
+.url-box{margin-bottom:14px;padding:14px;border:1px solid #dbe5f2;background:#f8fbff;border-radius:14px}
+.url-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;align-items:end}
+.url-row input{direction:ltr;text-align:left;margin-top:6px}
+.url-status{margin-top:8px;min-height:18px;font-size:10.5px;color:#64748b;word-break:break-all}
+.url-status.ok{color:#047857}.url-status.err{color:#b91c1c}
+.url-package{border:1px solid #bfdbfe;background:#fff;border-radius:16px;padding:18px;margin-top:18px}
+.url-package-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.url-package-item{border:1px solid #e2e8f0;background:#f8fafc;border-radius:12px;padding:12px}
+.url-package-item b{display:block;font-size:10px;color:#64748b;margin-bottom:4px}
+.url-package-item span{font-size:11px;color:#0f172a;word-break:break-word}
+.url-headings{margin-top:12px;display:grid;gap:7px}
+.url-heading{padding:8px 10px;border:1px solid #e2e8f0;border-radius:10px;background:#fff;font-size:10.5px}
+.url-heading small{color:#2563eb;margin-left:7px}
 .upload{border:1.5px dashed #cbd5e1;background:#f8fafc;border-radius:15px;padding:26px 18px;text-align:center;transition:.2s}
 .upload:hover{border-color:#93c5fd;background:#f8fbff}
 .upload-icon{width:46px;height:46px;margin:0 auto 10px;border-radius:13px;background:#eaf2ff;color:#2563eb;display:grid;place-items:center;font-size:22px}
@@ -125,7 +138,7 @@ textarea{min-height:145px;direction:ltr;text-align:left;font-family:ui-monospace
 .brief-query{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid #eef2f7}.brief-query:last-child{border-bottom:0}
 .brief-query b{font-size:10.5px}.brief-query span{font-size:9.2px;color:#64748b}.brief-query em{font-style:normal;font-size:9px;color:#2563eb}
 .footer-note{text-align:center;color:#94a3b8;font-size:9.5px;margin-top:30px}
-@media(max-width:900px){.hero-grid,.g2,.g3,.brief-grid,.brief-concepts{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.header-inner{align-items:flex-start}.status{justify-content:flex-start}.main,.header-inner{padding-left:16px;padding-right:16px}}
+@media(max-width:900px){.hero-grid,.g2,.g3,.brief-grid,.brief-concepts,.url-package-grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.header-inner{align-items:flex-start}.status{justify-content:flex-start}.main,.header-inner{padding-left:16px;padding-right:16px}}
 @media(max-width:540px){.metrics{grid-template-columns:1fr 1fr}.nav{width:100%}.tab{flex:1;padding-left:8px;padding-right:8px}.header-inner{display:block}.status{margin-top:14px}.actions .btn{flex:1}.keyword-card h3{font-size:18px}}
 </style>
 </head>
@@ -157,6 +170,15 @@ textarea{min-height:145px;direction:ltr;text-align:left;font-family:ui-monospace
         <div class="card-title">
           <div><h2>فایل Google Search Console</h2><p>Excel خروجی GSC را آپلود کن؛ محاسبات عددی داخل مرورگر انجام می‌شود.</p></div>
           <span class="step-badge">ورودی داده</span>
+        </div>
+        <div class="url-box">
+          <div class="url-row">
+            <label>URL صفحه
+              <input id="targetUrl" type="url" placeholder="https://example.com/page" autocomplete="off">
+            </label>
+            <button id="urlBtn" class="btn soft">ساخت بسته URL</button>
+          </div>
+          <div id="urlStatus" class="url-status">URL اختیاری است؛ اگر فقط URL بدهی، بسته محتوای عمومی صفحه ساخته می‌شود. برای Demand Metrics همچنان داده GSC لازم است.</div>
         </div>
         <div class="upload">
           <div class="upload-icon">↑</div>
@@ -241,7 +263,7 @@ var defaults={
 };
 var allowedTypes=["Core Entity","Semantic Concept","Temporal Qualifier","Modifier","Brand","Product / Model Entity","Location","Content Format","Action / Sub-intent","Question Pattern"];
 var allowedImp=["Core","Important","Secondary","Conditional"];
-var file=null,demo=false,currentEngine=null,currentAnalysis=null;
+var file=null,demo=false,currentEngine=null,currentAnalysis=null,targetPage=null,targetPageUrl="";
 var keys={relevance:"",classification:"",intent:""};
 var models={relevance:[],classification:[],intent:[]};
 var modelErrors={relevance:"",classification:"",intent:""};
@@ -387,6 +409,101 @@ function findGrid(wb,kind){
   }
   return null;
 }
+function cleanUrl(v){
+  var s=String(v==null?"":v).trim();
+  if(!s)return "";
+  if(!/^https?:\/\//i.test(s))s="https://"+s;
+  var u;
+  try{u=new URL(s);}catch(e){throw ce("ERROR_INVALID_URL","URL معتبر نیست.");}
+  if(u.protocol!=="http:"&&u.protocol!=="https:")throw ce("ERROR_INVALID_URL","فقط URLهای http/https پشتیبانی می‌شوند.");
+  u.hash="";
+  return u.toString();
+}
+function extractMarkdownHeadings(md){
+  return String(md||"").split(/\n+/).map(function(line){
+    var m=line.match(/^\s*(#{1,6})\s+(.+?)\s*$/);
+    if(!m)return null;
+    var text=m[2].replace(/\[([^\]]+)\]\([^)]*\)/g,"$1").replace(/[*_]/g,"").trim();
+    return text?{level:m[1].length,text:text}:null;
+  }).filter(Boolean).slice(0,80);
+}
+function pageWordCount(text){
+  var n=norm(String(text||"").replace(/https?:\/\/\S+/g," "));
+  return n?n.split(" ").filter(Boolean).length:0;
+}
+async function fetchUrlPackage(rawUrl){
+  var url=cleanUrl(rawUrl);
+  $("urlStatus").className="url-status";
+  $("urlStatus").textContent="در حال خواندن صفحه...";
+  var endpoint="https://r.jina.ai/"+url;
+  var r;
+  try{
+    r=await fetch(endpoint,{headers:{"Accept":"application/json"}});
+  }catch(e){
+    $("urlStatus").className="url-status err";
+    throw ce("ERROR_URL_FETCH","اتصال به سرویس خواندن URL برقرار نشد: "+String(e&&e.message||e));
+  }
+  var body=await r.text();
+  if(!r.ok)throw ce("ERROR_URL_FETCH","Reader HTTP "+r.status+" — "+body.slice(0,220));
+  var j;
+  try{j=JSON.parse(body);}catch(e){throw ce("ERROR_URL_INVALID_RESPONSE","پاسخ Reader قابل parse نبود.");}
+  var d=j&&j.data;
+  if(!d||typeof d.content!=="string"||!d.content.trim())throw ce("ERROR_URL_EMPTY_CONTENT","محتوای قابل استفاده از URL دریافت نشد.");
+  if(d.warning&&/404|not found/i.test(String(d.warning)))throw ce("ERROR_URL_NOT_FOUND",String(d.warning));
+  var pkg={
+    inputUrl:url,
+    url:String(d.url||url),
+    title:String(d.title||"").trim(),
+    description:String(d.description||"").trim(),
+    content:String(d.content||""),
+    headings:extractMarkdownHeadings(d.content),
+    words:pageWordCount(d.content),
+    warning:String(d.warning||"").trim()
+  };
+  targetPage=pkg;targetPageUrl=url;
+  $("targetUrl").value=url;
+  $("urlStatus").className="url-status ok";
+  $("urlStatus").textContent="URL خوانده شد · "+fmt.format(pkg.words)+" کلمه · "+fmt.format(pkg.headings.length)+" Heading";
+  return pkg;
+}
+function renderUrlPackage(pkg,append){
+  var heads=(pkg.headings||[]).slice(0,30).map(function(h){
+    return '<div class="url-heading"><small>H'+h.level+'</small>'+esc(h.text)+'</div>';
+  }).join("");
+  var html='<div class="url-package">'+
+    '<div class="card-title"><div><h3>بسته URL</h3><p>خلاصه محتوای عمومی صفحه؛ این بخش جای داده Search Console را نمی‌گیرد.</p></div><span class="step-badge">URL Context</span></div>'+
+    '<div class="url-package-grid">'+
+      '<div class="url-package-item"><b>عنوان صفحه</b><span>'+esc(pkg.title||"—")+'</span></div>'+
+      '<div class="url-package-item"><b>URL نهایی</b><span dir="ltr">'+esc(pkg.url||pkg.inputUrl)+'</span></div>'+
+      '<div class="url-package-item"><b>حجم متن قابل‌خواندن</b><span>'+fmt.format(pkg.words)+' کلمه</span></div>'+
+    '</div>'+
+    '<div class="url-package-item" style="margin-top:10px"><b>Description</b><span>'+esc(pkg.description||"—")+'</span></div>'+
+    '<div class="url-headings">'+(heads||'<div class="url-heading">Heading قابل استخراج پیدا نشد.</div>')+'</div>'+
+    '<div class="brief-note">این بسته از محتوای عمومی خود URL ساخته شده است. Impression، Query Demand، Primary Keyword مبتنی بر تقاضا و Coverage فقط با فایل/داده GSC قابل محاسبه‌اند.</div>'+
+  '</div>';
+  if(append)$("out").insertAdjacentHTML("afterbegin",html);else $("out").innerHTML=html;
+}
+async function ensureUrlContext(){
+  var raw=$("targetUrl").value.trim();
+  if(!raw)return null;
+  var url=cleanUrl(raw);
+  if(targetPage&&targetPageUrl===url)return targetPage;
+  return await fetchUrlPackage(url);
+}
+async function runUrlOnly(){
+  clearError();$("out").innerHTML="";
+  try{
+    var pkg=await ensureUrlContext();
+    if(!pkg)throw ce("ERROR_INVALID_URL","URL را وارد کن.");
+    resetPipe();
+    pdefs.forEach(function(x){report(x[0],"skip","URL-only");});
+    renderUrlPackage(pkg,false);
+  }catch(e){
+    $("urlStatus").className="url-status err";
+    $("urlStatus").textContent=e.message||String(e);
+    showError(e.code||"ERROR",e.message||String(e));
+  }
+}
 async function parseXlsx(f){
   if(!window.XLSX)throw ce("ERROR_XLSX","کتابخانه خواندن Excel در دسترس نیست.");
   var wb=XLSX.read(await f.arrayBuffer(),{type:"array"});
@@ -470,7 +587,7 @@ async function engine(src){
   report("candidates","running","در حال انتخاب");
   var cs=candidates(ps,settings.candidateLimit,vi);
   report("candidates","done",cs.length+" candidates");
-  return {name:name,queries:qs,phrases:ps,candidates:cs,summary:{valid:qs.length,visible:vi,clicks:vc,total:parsed.total,coverage:parsed.total?vi/parsed.total*100:null,maxQueryLength:Math.max.apply(null,qs.map(function(q){return q.tokens.length;}))}};
+  return {name:name,queries:qs,phrases:ps,candidates:cs,pageContext:targetPage,summary:{valid:qs.length,visible:vi,clicks:vc,total:parsed.total,coverage:parsed.total?vi/parsed.total*100:null,maxQueryLength:Math.max.apply(null,qs.map(function(q){return q.tokens.length;}))}};
 }
 
 function cleanApiKey(raw){
@@ -1400,7 +1517,13 @@ function relevanceClusters(e){
 async function relevance(e){
   if(settings.stages.relevance.provider==="gemini"){
     var pack=relevanceClusters(e),out={},batchSize=30,batches=[];
-    var pageContext=e.queries.slice(0,20).map(function(q){return {query:q.normalized,impressions:q.impressions};});
+    var pageContext={
+      url:e.pageContext?e.pageContext.url:"",
+      title:e.pageContext?e.pageContext.title:"",
+      description:e.pageContext?e.pageContext.description:"",
+      headings:e.pageContext?e.pageContext.headings.slice(0,20):[],
+      top_queries:e.queries.slice(0,20).map(function(q){return {query:q.normalized,impressions:q.impressions};})
+    };
     for(var ri=0;ri<pack.clusters.length;ri+=batchSize)batches.push(pack.clusters.slice(ri,ri+batchSize));
     for(var bi=0;bi<batches.length;bi++){
       var batch=batches[bi];
@@ -1420,7 +1543,7 @@ async function relevance(e){
   }
   if(settings.stages.relevance.provider==="githubfree"){
     var pack=relevanceClusters(e),out={},batchSize=10,batches=[];
-    var pageContext=e.queries.slice(0,12).map(function(q){return q.normalized;});
+    var pageContext={url:e.pageContext?e.pageContext.url:"",title:e.pageContext?e.pageContext.title:"",headings:e.pageContext?e.pageContext.headings.slice(0,12):[],top_queries:e.queries.slice(0,12).map(function(q){return q.normalized;})};
     for(var ri=0;ri<pack.clusters.length;ri+=batchSize)batches.push(pack.clusters.slice(ri,ri+batchSize));
     for(var bi=0;bi<batches.length;bi++){
       var batch=batches[bi];
@@ -1630,6 +1753,7 @@ async function intent(e,cd){
   var j;
   if(settings.stages.intent.provider==="gemini"){
     var g=await geminiAi("intent",{
+      page_context:e.pageContext?{url:e.pageContext.url,title:e.pageContext.title,description:e.pageContext.description,headings:e.pageContext.headings.slice(0,20)}:null,
       query_candidates:qc.map(function(q,idx){return {index:idx,query:q.normalized,impressions:q.impressions,token_count:q.tokens.length};}),
       concepts:pre.map(function(c,idx){return {index:idx,type:c.type,query_count:c.count,impressions:c.impressions,coverage_percent:Number(c.share.toFixed(1)),wordings:c.words.slice(0,5).map(function(w){return w.text;})};})
     },{qCount:qc.length,cCount:pre.length});
@@ -1821,10 +1945,11 @@ function renderFull(e,a){
 async function run(mode,src){
   clearError();resetPipe();$("out").innerHTML="";
   try{
+    if($("targetUrl").value.trim())await ensureUrlContext();
     currentEngine=await engine(src);
     if(mode==="data"){
       ["rel","class","concept","intent","select","final"].forEach(function(x){report(x,"skip","اجرا نشد");});
-      renderData(currentEngine);addHistory("data",currentEngine,null);return;
+      renderData(currentEngine);if(targetPage)renderUrlPackage(targetPage,true);addHistory("data",currentEngine,null);return;
     }
     var rel=await relevance(currentEngine);
     var classification=await classify(currentEngine,rel);
@@ -1834,7 +1959,7 @@ async function run(mode,src){
     if(reps.length!==3)throw ce("REVIEW_REQUIRED_REPRESENTATIVE_QUERIES","سه Query نماینده قابل اتکا پیدا نشد.");
     report("final","done","validated");
     currentAnalysis={relevance:rel,classification:classification,intent:it,reps:reps};
-    renderFull(currentEngine,currentAnalysis);addHistory("full",currentEngine,currentAnalysis);
+    renderFull(currentEngine,currentAnalysis);if(targetPage)renderUrlPackage(targetPage,true);addHistory("full",currentEngine,currentAnalysis);
   }catch(e){
     showError(e.code||"ERROR",e.message||String(e));
     var current=pdefs.find(function(x){return pstate[x[0]]&&pstate[x[0]].s==="running";});
@@ -1934,10 +2059,27 @@ document.querySelectorAll(".tab").forEach(function(b){
     if(b.dataset.tab==="history")renderHistory();
   };
 });
+$("targetUrl").oninput=function(){
+  var v=$("targetUrl").value.trim();
+  if(!v){
+    targetPage=null;targetPageUrl="";
+    $("urlStatus").className="url-status";
+    $("urlStatus").textContent="URL اختیاری است؛ اگر فقط URL بدهی، بسته محتوای عمومی صفحه ساخته می‌شود. برای Demand Metrics همچنان داده GSC لازم است.";
+    return;
+  }
+  targetPage=null;targetPageUrl="";
+};
+$("urlBtn").onclick=function(){runUrlOnly();};
 $("file").onchange=function(){file=$("file").files[0]||null;demo=false;$("fileMeta").textContent=file?"فایل انتخاب‌شده: "+file.name:"";};
 $("demoBtn").onclick=function(){demo=true;file=null;$("file").value="";$("fileMeta").textContent="حالت DEMO فعال شد";};
-$("dataBtn").onclick=function(){if(!file&&!demo)return showError("ERROR_NO_FILE","فایل Excel را انتخاب کن یا DEMO را فعال کن.");run("data",demo?"demo":"file");};
-$("fullBtn").onclick=function(){if(!file&&!demo)return showError("ERROR_NO_FILE","فایل Excel را انتخاب کن یا DEMO را فعال کن.");run("full",demo?"demo":"file");};
+$("dataBtn").onclick=function(){if(!file&&!demo)return showError("ERROR_GSC_DATA_REQUIRED","موتور Demand Data به فایل Excel از GSC نیاز دارد. برای URL تنها از «ساخت بسته URL» استفاده کن.");run("data",demo?"demo":"file");};
+$("fullBtn").onclick=function(){
+  if(!file&&!demo){
+    if($("targetUrl").value.trim())return runUrlOnly();
+    return showError("ERROR_NO_INPUT","URL یا فایل Excel را وارد کن.");
+  }
+  run("full",demo?"demo":"file");
+};
 $("save").onclick=function(){settings.candidateLimit=Math.min(400,Math.max(20,Number($("cand").value)||140));saveSettings();alert("تنظیمات ذخیره شد. API Key ذخیره نشد.");};
 $("clearHist").onclick=function(){localStorage.removeItem("ski-v2-history");renderHistory();};
 
