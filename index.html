@@ -171,6 +171,19 @@ textarea{min-height:145px;direction:ltr;text-align:left;font-family:ui-monospace
           <div><h2>فایل Google Search Console</h2><p>Excel خروجی GSC را آپلود کن؛ محاسبات عددی داخل مرورگر انجام می‌شود.</p></div>
           <span class="step-badge">ورودی داده</span>
         </div>
+        <div class="url-box" style="margin-bottom:14px">
+          <div class="card-title" style="margin-bottom:10px">
+            <div><h3>اتصال AI</h3><p>برای تحلیل کامل، Gemini را یک‌بار اینجا وصل کن؛ Key فقط در RAM همین تب می‌ماند.</p></div>
+            <span class="step-badge">Preflight</span>
+          </div>
+          <div class="url-row">
+            <label>Gemini API Key
+              <input id="quickGeminiKey" type="password" placeholder="Gemini API Key" autocomplete="off" dir="ltr">
+            </label>
+            <button id="geminiTestBtn" class="btn primary">تست و فعال‌سازی Gemini</button>
+          </div>
+          <div id="aiPreflight" class="url-status">قبل از تحلیل کامل، اتصال واقعی Gemini را تست کن.</div>
+        </div>
         <div class="url-box">
           <div class="url-row">
             <label>URL صفحه
@@ -251,9 +264,8 @@ var stageNames={
 };
 var providers={
   gemini:{label:"Google Gemini API — پیشنهادی",endpoint:"https://generativelanguage.googleapis.com/v1beta"},
-  githubfree:{label:"GitHub Free Auto — آزمایشی",endpoint:"https://text.pollinations.ai"},
-  groq:{label:"Groq — اختیاری",endpoint:"https://api.groq.com/openai/v1"},
   openrouter:{label:"OpenRouter — اختیاری",endpoint:"https://openrouter.ai/api/v1"},
+  groq:{label:"Groq — اختیاری",endpoint:"https://api.groq.com/openai/v1"},
   custom:{label:"OpenAI-compatible Endpoint",endpoint:""}
 };
 var defaults={
@@ -288,58 +300,20 @@ function loadSettings(){
     var x=JSON.parse(localStorage.getItem("ski-v2-settings")||"null");
     if(!x)return b;
     b.candidateLimit=Number(x.candidateLimit)||140;
-    stageKeys.forEach(function(k){if(x.stages&&x.stages[k])b.stages[k]=Object.assign({},b.stages[k],x.stages[k]);});
-    if(x.freeProviderVersion!=="puter-free-v1"){
-      stageKeys.forEach(function(k){
-        b.stages[k].provider="puter";
-        b.stages[k].endpoint="";
-        b.stages[k].model="gemini-3.8-flash";
-        b.stages[k].timeout=90000;
-      });
-      b.freeProviderVersion="puter-free-v1";
-    }
-    if(x.freePipelineVersion!=="cluster-v2"){
-      var rp=String(b.stages.relevance.prompt||"");
-      if(!rp || rp.indexOf("برای هر query ID")>=0 || rp.indexOf("context_top_queries")>=0){
-        b.stages.relevance.prompt=defaults.relevance;
+    stageKeys.forEach(function(k){
+      var saved=x.stages&&x.stages[k]?x.stages[k]:null;
+      if(!saved)return;
+      var p=String(saved.provider||"");
+      if(!providers[p]){
+        b.stages[k]=Object.assign({},b.stages[k]);
+        return;
       }
-      b.freePipelineVersion="cluster-v2";
-    }
-    if(x.providerMigrationVersion!=="llm7-v1"){
-      stageKeys.forEach(function(k){
-        if(["puter","groq"].indexOf(b.stages[k].provider)>=0 || !b.stages[k].provider){
-          b.stages[k].provider="llm7";
-          b.stages[k].endpoint=providers.llm7.endpoint;
-          b.stages[k].model="default";
-          b.stages[k].timeout=90000;
-        }
-      });
-      b.providerMigrationVersion="llm7-v1";
-      try{localStorage.setItem("ski-v2-settings",JSON.stringify(b));}catch(ignore){}
-    }
-    if(x.githubFreeMigrationVersion!=="githubfree-v3"){
-      stageKeys.forEach(function(k){
-        if(["llm7","puter","groq"].indexOf(b.stages[k].provider)>=0 || !b.stages[k].provider){
-          b.stages[k].provider="githubfree";
-          b.stages[k].endpoint=providers.githubfree.endpoint;
-          b.stages[k].model="openai-fast";
-          b.stages[k].timeout=90000;
-        }
-      });
-      b.githubFreeMigrationVersion="githubfree-v3";
-    }
-    if(x.geminiMigrationVersion!=="gemini-v1"){
-      stageKeys.forEach(function(k){
-        b.stages[k].provider="gemini";
+      b.stages[k]=Object.assign({},b.stages[k],saved);
+      if(p==="gemini"){
         b.stages[k].endpoint=providers.gemini.endpoint;
-        b.stages[k].model="";
-        b.stages[k].timeout=90000;
-        var p=String(b.stages[k].prompt||"");
-        if(!p || /query_id|concept_key.*ARRAY|خروجی فقط JSON|همه ID|input_id/.test(p))b.stages[k].prompt=defaults[k];
-      });
-      b.geminiMigrationVersion="gemini-v1";
-      try{localStorage.setItem("ski-v2-settings",JSON.stringify(b));}catch(ignore){}
-    }
+        b.stages[k].model="gemini-3.8-flash";
+      }
+    });
   }catch(e){}
   return b;
 }
@@ -601,7 +575,7 @@ function cleanApiKey(raw){
   return s;
 }
 function safeHeaders(stage,withJson){
-  var k=settings.stages[stage].provider==="githubfree"?"":cleanApiKey(keys[stage]);
+  var k=cleanApiKey(keys[stage]);
   var h={};
   if(withJson)h["content-type"]="application/json";
   if(k)h["Authorization"]="Bearer "+k;
@@ -1136,6 +1110,63 @@ function geminiStageInstruction(stage,meta){
   if(stage==="classification")return "برای هر phrase دقیقاً یک object به همان ترتیب ورودی بده. ID نساز. concept_key باید کوتاه، canonical و برای عبارت‌های هم‌معنی یکسان باشد.";
   return "Queryها و conceptها با index صفرمبنا داده شده‌اند. فقط index انتخاب کن؛ ID نساز. concept_importance باید دقیقاً به تعداد conceptها و همان ترتیب باشد.";
 }
+function activateGeminiForAll(rawKey){
+  var k=cleanApiKey(rawKey);
+  if(!k)throw ce("AI_NOT_CONFIGURED","Gemini API Key وارد نشده است.");
+  stageKeys.forEach(function(s){
+    keys[s]=k;
+    settings.stages[s].provider="gemini";
+    settings.stages[s].endpoint=providers.gemini.endpoint;
+    settings.stages[s].model="gemini-3.8-flash";
+    settings.stages[s].timeout=90000;
+  });
+  saveSettings();
+  return k;
+}
+async function testGeminiConnection(rawKey){
+  var k=activateGeminiForAll(rawKey);
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},30000);
+  try{
+    var r=await fetch(providers.gemini.endpoint+"/models/gemini-3.8-flash:generateContent",{
+      method:"POST",
+      headers:{"content-type":"application/json","x-goog-api-key":k},
+      signal:ctrl.signal,
+      body:JSON.stringify({
+        contents:[{role:"user",parts:[{text:"Return exactly the word OK."}]}],
+        generationConfig:{maxOutputTokens:8,thinkingConfig:{thinkingLevel:"LOW"}}
+      })
+    });
+    var raw=await r.text();
+    if(!r.ok){
+      if(r.status===401||r.status===403)throw ce("ERROR_GEMINI_AUTH","Gemini Key رد شد: "+raw.slice(0,220));
+      if(r.status===429)throw ce("ERROR_PROVIDER_RATE_LIMIT","Gemini rate/quota limit: "+raw.slice(0,220));
+      throw ce("ERROR_PROVIDER_UNAVAILABLE","Gemini "+r.status+" — "+raw.slice(0,220));
+    }
+    var j=JSON.parse(raw),parts=j&&j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts;
+    var txt=Array.isArray(parts)?parts.map(function(p){return p&&p.text||"";}).join("").trim():"";
+    if(!txt)throw ce("ERROR_AI_EMPTY_RESPONSE","Gemini پاسخ تست نداد.");
+    return true;
+  }catch(e){
+    if(e&&e.name==="AbortError")throw ce("ERROR_PROVIDER_TIMEOUT","تست Gemini بعد از ۳۰ ثانیه timeout شد.");
+    if(e&&e.code)throw e;
+    if(e instanceof TypeError)throw ce("ERROR_GEMINI_NETWORK","مرورگر نتوانست به Gemini وصل شود: "+String(e&&e.message||e));
+    throw e;
+  }finally{clearTimeout(timer);}
+}
+function assertFullAiConfigured(){
+  stageKeys.forEach(function(s){
+    var c=settings.stages[s];
+    if(!c||!providers[c.provider])throw ce("AI_NOT_CONFIGURED","Provider معتبر برای "+stageNames[s]+" تنظیم نشده است.");
+    if(c.provider==="gemini"){
+      if(!cleanApiKey(keys[s]))throw ce("AI_NOT_CONFIGURED","Gemini API Key را در کادر «اتصال AI» وارد و تست کن.");
+      c.endpoint=providers.gemini.endpoint;
+      c.model="gemini-3.8-flash";
+    }else{
+      if(!cleanApiKey(keys[s]))throw ce("AI_NOT_CONFIGURED","API Key در "+stageNames[s]+" وارد نشده است.");
+      if(!String(c.model||"").trim())throw ce("AI_NOT_CONFIGURED","Model در "+stageNames[s]+" انتخاب نشده است.");
+    }
+  });
+}
 async function geminiAi(stage,userPayload,meta){
   var c=settings.stages[stage],k=cleanApiKey(keys[stage]);
   if(!k)throw ce("AI_NOT_CONFIGURED","Gemini API Key در "+stageNames[stage]+" وارد نشده است.");
@@ -1150,9 +1181,10 @@ async function geminiAi(stage,userPayload,meta){
       systemInstruction:{parts:[{text:geminiStageInstruction(stage,meta)+"\nقواعد معنایی:\n"+c.prompt}]},
       contents:[{role:"user",parts:[{text:JSON.stringify(userPayload)}]}],
       generationConfig:{
-        temperature:Number(c.temp)||0,
         maxOutputTokens:16384,
-        responseFormat:{text:{mimeType:"application/json",schema:geminiSchema(stage,meta)}}
+        responseMimeType:"application/json",
+        responseJsonSchema:geminiSchema(stage,meta),
+        thinkingConfig:{thinkingLevel:"LOW"}
       }
     };
     var r=await fetch(base+"/models/"+encodeURIComponent(model)+":generateContent",{
@@ -1419,7 +1451,6 @@ async function aiRequest(stage,payload,strictRetry){
 }
 async function ai(stage,payload){
   var c=settings.stages[stage];
-  if(c.provider==="githubfree")return githubFreeAi(stage,payload);
   var base=(c.endpoint||providers[c.provider].endpoint||"").replace(/\/$/,"");
   if(!base)throw ce("AI_NOT_CONFIGURED","Endpoint در "+stageNames[stage]+" کامل نیست.");
   var k=cleanApiKey(keys[stage]);
@@ -1945,6 +1976,7 @@ function renderFull(e,a){
 async function run(mode,src){
   clearError();resetPipe();$("out").innerHTML="";
   try{
+    if(mode==="full")assertFullAiConfigured();
     if($("targetUrl").value.trim())await ensureUrlContext();
     currentEngine=await engine(src);
     if(mode==="data"){
@@ -1976,9 +2008,9 @@ function renderSettings(){
       '<div class="grid g3">'+
         '<label>Provider<select data-prov="'+s+'">'+Object.keys(providers).map(function(id){return '<option value="'+id+'" '+(c.provider===id?"selected":"")+'>'+esc(providers[id].label)+'</option>';}).join("")+'</select></label>'+
         '<label>Endpoint<input data-endpoint="'+s+'" value="'+esc(c.provider==="puter"?"مدیریت‌شده توسط Puter":c.endpoint)+'" dir="ltr" '+(c.provider==="puter"?"disabled":"")+'></label>'+
-        '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+(c.provider==="githubfree"?"نیاز ندارد":c.provider==="gemini"?"Google AI Studio API Key":c.provider==="groq"?"gsk_...":"sk-or-...")+'" '+((c.provider==="githubfree")?"disabled":"")+'></label>'+
+        '<label>API Key — ذخیره نمی‌شود<input data-key="'+s+'" type="password" value="'+esc(keys[s])+'" dir="ltr" placeholder="'+(c.provider==="gemini"?"Google AI Studio API Key":c.provider==="groq"?"gsk_...":"sk-or-...")+'"></label>'+
       '</div>'+
-      '<div class="hint">'+(c.provider==="gemini"?"پیشنهادی: Gemini API رسمی با Structured Output و JSON Schema. کلید فقط در حافظه همین تب است و ذخیره نمی‌شود. مدل‌های پایدار Gemini داخل ابزار تعریف شده‌اند تا ListModels مرورگر مانع اجرا نشود؛ درخواست تحلیل مستقیماً به generateContent رسمی Google می‌رود.":c.provider==="githubfree"?"آزمایشی؛ بدون Key ولی برای تحلیل اصلی توصیه نمی‌شود.":c.provider==="groq"?"Groq اختیاری است و API Key می‌خواهد.":c.provider==="openrouter"?"OpenRouter اختیاری است و API Key می‌خواهد.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
+      '<div class="hint">'+(c.provider==="gemini"?"پیشنهادی: Gemini API رسمی با Structured Output. Key فقط در RAM تب است.":c.provider==="groq"?"Groq اختیاری است و API Key می‌خواهد.":c.provider==="openrouter"?"OpenRouter اختیاری است و API Key می‌خواهد.":"برای Endpoint سفارشی، مسیر base سازگار با OpenAI را وارد کن.")+'</div>'+
       '<div class="grid g2">'+
         '<div>'+
           '<div class="model-actions"><button class="btn green" data-load="'+s+'">'+(c.provider==="gemini"?"نمایش مدل‌های پیشنهادی Gemini":"بارگذاری / به‌روزرسانی مدل‌ها")+'</button><input data-search="'+s+'" placeholder="جست‌وجو بین مدل‌ها" style="margin:0;flex:1;min-width:180px"></div>'+
@@ -2000,8 +2032,7 @@ function bindSettings(){
   document.querySelectorAll("[data-prov]").forEach(function(el){
     el.onchange=function(){
       var s=el.dataset.prov,p=el.value;
-      settings.stages[s].provider=p;settings.stages[s].endpoint=providers[p].endpoint;settings.stages[s].model=p==="githubfree"?"openai-fast":p==="gemini"?"gemini-3.8-flash":"";
-      if(p==="githubfree")keys[s]="";
+      settings.stages[s].provider=p;settings.stages[s].endpoint=providers[p].endpoint;settings.stages[s].model=p==="gemini"?"gemini-3.8-flash":"";
       models[s]=[];modelErrors[s]="";renderSettings();
     };
   });
@@ -2059,6 +2090,27 @@ document.querySelectorAll(".tab").forEach(function(b){
     if(b.dataset.tab==="history")renderHistory();
   };
 });
+$("geminiTestBtn").onclick=async function(){
+  clearError();
+  var btn=$("geminiTestBtn"),status=$("aiPreflight");
+  btn.disabled=true;status.className="url-status";status.textContent="در حال تست واقعی Gemini...";
+  try{
+    await testGeminiConnection($("quickGeminiKey").value);
+    status.className="url-status ok";
+    status.textContent="اتصال واقعی Gemini برقرار شد · gemini-3.8-flash برای هر ۳ مرحله فعال است.";
+    renderSettings();
+  }catch(e){
+    status.className="url-status err";
+    status.textContent=(e.code||"ERROR")+" — "+(e.message||String(e));
+    showError(e.code||"ERROR",e.message||String(e));
+  }finally{btn.disabled=false;}
+};
+$("quickGeminiKey").oninput=function(){
+  var v=$("quickGeminiKey").value;
+  if(v){
+    try{activateGeminiForAll(v);$("aiPreflight").className="url-status";$("aiPreflight").textContent="Key در RAM ثبت شد؛ برای تأیید اتصال دکمه تست را بزن.";}catch(e){}
+  }
+};
 $("targetUrl").oninput=function(){
   var v=$("targetUrl").value.trim();
   if(!v){
@@ -2074,6 +2126,9 @@ $("file").onchange=function(){file=$("file").files[0]||null;demo=false;$("fileMe
 $("demoBtn").onclick=function(){demo=true;file=null;$("file").value="";$("fileMeta").textContent="حالت DEMO فعال شد";};
 $("dataBtn").onclick=function(){if(!file&&!demo)return showError("ERROR_GSC_DATA_REQUIRED","موتور Demand Data به فایل Excel از GSC نیاز دارد. برای URL تنها از «ساخت بسته URL» استفاده کن.");run("data",demo?"demo":"file");};
 $("fullBtn").onclick=function(){
+  if($("quickGeminiKey").value.trim()){
+    try{activateGeminiForAll($("quickGeminiKey").value);}catch(e){return showError(e.code||"ERROR",e.message||String(e));}
+  }
   if(!file&&!demo){
     if($("targetUrl").value.trim())return runUrlOnly();
     return showError("ERROR_NO_INPUT","URL یا فایل Excel را وارد کن.");
